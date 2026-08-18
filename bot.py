@@ -2948,6 +2948,119 @@ def process_track_order(message):
         bot.send_message(user_id, msg)
 
 
+def get_order_status_for_display(order):
+    order_id = order.get("order_id")
+    if order_id is None:
+        return "Completed"
+
+    reservation = wallet_reservations_collection.find_one({"order_id": order_id})
+    if reservation:
+        status = reservation.get("status")
+        if status == "settled":
+            return "Completed"
+        if status == "pending":
+            return "Pending"
+        if status == "released":
+            return "Released"
+        if status:
+            return str(status).title()
+
+    return "Completed"
+
+
+def get_order_amount_for_display(order):
+    quantity = order.get("quantity")
+    if quantity is None:
+        return "N/A"
+
+    service_name = order.get("service_name") or order.get("service_type")
+    service = services_collection.find_one({"name": service_name}) if service_name else None
+    if not service:
+        return "N/A"
+    price = service.get("price")
+    if price is None or float(price) <= 0:
+        return "N/A"
+    amount = float(quantity) / float(price)
+    return f"{amount:.2f} pts"
+
+
+def render_my_orders_page(user_id, page=0, page_size=5):
+    orders = list(orders_collection.find({"user_id": int(user_id)}).sort("_id", -1))
+    total_pages = max(1, (len(orders) + page_size - 1) // page_size)
+    page = max(0, min(page, total_pages - 1))
+    start = page * page_size
+    end = start + page_size
+    page_orders = orders[start:end]
+
+    if not page_orders:
+        return "📦 <b>My Orders</b>\n\nNo orders found.", None
+
+    lines = ["📦 <b>My Orders</b>", f"Page {page + 1}/{total_pages}"]
+    for order in page_orders:
+        service_name = str(order.get("service_name") or order.get("service_type") or "Unknown")
+        quantity = order.get("quantity", "N/A")
+        order_id = order.get("order_id", "N/A")
+        amount = get_order_amount_for_display(order)
+        status = get_order_status_for_display(order)
+        lines.append("")
+        lines.append(f"🆔 <code>{escape(str(order_id))}</code>")
+        lines.append(f"Service: <b>{escape(service_name)}</b>")
+        lines.append(f"Quantity: <b>{quantity}</b>")
+        lines.append(f"Amount: <b>{amount}</b>")
+        lines.append(f"Status: <b>{escape(str(status))}</b>")
+
+    markup = telebot.types.InlineKeyboardMarkup(row_width=4)
+    if page > 0:
+        markup.add(telebot.types.InlineKeyboardButton("⬅️ Previous", callback_data=f"my_orders_page:{page - 1}"))
+    else:
+        markup.add(telebot.types.InlineKeyboardButton("⬅️ Previous", callback_data="my_orders_disabled"))
+    if page + 1 < total_pages:
+        markup.add(telebot.types.InlineKeyboardButton("➡️ Next", callback_data=f"my_orders_page:{page + 1}"))
+    else:
+        markup.add(telebot.types.InlineKeyboardButton("➡️ Next", callback_data="my_orders_disabled"))
+    markup.add(
+        telebot.types.InlineKeyboardButton("🔙 Back", callback_data="my_orders_back"),
+        telebot.types.InlineKeyboardButton("🏠 Home", callback_data="svc_catalog_home"),
+    )
+    return "\n".join(lines), markup
+
+
+@bot.message_handler(func=lambda m: m.text == "📦 My Orders")
+@safe_handler
+@require_not_banned
+def my_orders(message):
+    user_id = message.chat.id
+    text, markup = render_my_orders_page(user_id, page=0)
+    if markup is None:
+        bot.send_message(user_id, text)
+        return
+    bot.send_message(user_id, text, reply_markup=markup, disable_web_page_preview=True)
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("my_orders_page:"))
+@safe_callback
+def my_orders_page_callback(call):
+    user_id = call.message.chat.id
+    page = int(call.data.split(":", 1)[1])
+    text, markup = render_my_orders_page(user_id, page=page)
+    if markup is None:
+        bot.edit_message_text(text, user_id, call.message.message_id)
+        return
+    bot.edit_message_text(text, user_id, call.message.message_id, reply_markup=markup, disable_web_page_preview=True)
+
+
+@bot.callback_query_handler(func=lambda c: c.data == "my_orders_disabled")
+@safe_callback
+def my_orders_disabled_callback(call):
+    bot.answer_callback_query(call.id, "No more orders to show.")
+
+
+@bot.callback_query_handler(func=lambda c: c.data == "my_orders_back")
+@safe_callback
+def my_orders_back_callback(call):
+    bot.edit_message_text("🏠 <b>Main Menu</b>", call.message.chat.id, call.message.message_id, reply_markup=main_menu())
+
+
 @bot.message_handler(func=lambda m: m.text == "📜 Order History")
 @safe_handler
 @require_not_banned
