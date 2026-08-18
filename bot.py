@@ -668,17 +668,47 @@ def join_menu():
 
 
 def main_menu():
-    markup = telebot.types.ReplyKeyboardMarkup(resize_keyboard=True)
-    enabled_services = get_enabled_services()
-    for index in range(0, len(enabled_services), 3):
-        markup.row(*(service["name"] for service in enabled_services[index:index + 3]))
-    markup.row("� Services")
-    markup.row("🔎 Search Service")
-    markup.row("💰 Check Balance", "🎁 Claim Bonus")
-    markup.row("➕ Add Funds", "📢 Refer & Earn")
-    markup.row("🔳 GiftCode", "💬 Feedback")
-    markup.row("🖲 Track Order", "📜 Order History")
+    markup = telebot.types.InlineKeyboardMarkup(row_width=2)
+    markup.add(
+        telebot.types.InlineKeyboardButton("🛍 Order Services", callback_data="svc_catalog_home"),
+        telebot.types.InlineKeyboardButton("📦 My Orders", callback_data="main_menu_my_orders"),
+    )
+    markup.add(
+        telebot.types.InlineKeyboardButton("💰 Check Balance", callback_data="main_menu_check_balance"),
+        telebot.types.InlineKeyboardButton("➕ Add Funds", callback_data="main_menu_add_funds"),
+    )
+    markup.add(
+        telebot.types.InlineKeyboardButton("📢 Refer & Earn", callback_data="main_menu_refer"),
+        telebot.types.InlineKeyboardButton("🔎 Search Service", callback_data="main_menu_search"),
+    )
     return markup
+
+
+def make_dummy_message(chat_id, text):
+    class ChatProxy:
+        id = chat_id
+
+    class MessageProxy:
+        def __init__(self, chat_id_value, text_value):
+            self.chat = ChatProxy()
+            self.chat.id = chat_id_value
+            self.text = text_value
+
+    return MessageProxy(chat_id, text)
+
+
+def trigger_main_menu_action(call, action_text):
+    message = make_dummy_message(call.message.chat.id, action_text)
+    if action_text == "📦 My Orders":
+        my_orders(message)
+    elif action_text == "💰 Check Balance":
+        check_balance(message)
+    elif action_text == "➕ Add Funds":
+        add_funds(message)
+    elif action_text == "📢 Refer & Earn":
+        refer_earn(message)
+    elif action_text == "🔎 Search Service":
+        search_service(message)
 
 
 def get_enabled_services_by_category():
@@ -690,32 +720,67 @@ def get_enabled_services_by_category():
     return grouped
 
 
-def service_catalog_home_markup():
+def service_catalog_home_markup(page=0, page_size=6):
     grouped = get_enabled_services_by_category()
     markup = telebot.types.InlineKeyboardMarkup(row_width=1)
-    if not grouped:
+    categories = sorted(grouped.keys(), key=lambda text: text.lower())
+    if not categories:
         markup.add(telebot.types.InlineKeyboardButton("🏠 Home", callback_data="svc_catalog_home"))
         return markup
 
-    for category in sorted(grouped.keys(), key=lambda text: text.lower()):
+    total_pages = max(1, (len(categories) + page_size - 1) // page_size)
+    page = max(0, min(page, total_pages - 1))
+    start = page * page_size
+    end = start + page_size
+    for category in categories[start:end]:
         services_count = len(grouped[category])
         markup.add(telebot.types.InlineKeyboardButton(
             f"{category} ({services_count})",
             callback_data=f"svc_catalog_category:{category}"
         ))
+
+    if total_pages > 1:
+        nav_row = []
+        nav_row.append(telebot.types.InlineKeyboardButton(
+            "⬅️ Previous" if page > 0 else "⬅️ Previous",
+            callback_data=f"svc_catalog_home_page:{page - 1}" if page > 0 else "svc_catalog_home_disabled"
+        ))
+        nav_row.append(telebot.types.InlineKeyboardButton(
+            "➡️ Next" if page + 1 < total_pages else "➡️ Next",
+            callback_data=f"svc_catalog_home_page:{page + 1}" if page + 1 < total_pages else "svc_catalog_home_disabled"
+        ))
+        markup.row(*nav_row)
+
     markup.add(telebot.types.InlineKeyboardButton("🏠 Home", callback_data="svc_catalog_home"))
     return markup
 
 
-def service_catalog_category_markup(category):
+def service_catalog_category_markup(category, page=0, page_size=6):
     grouped = get_enabled_services_by_category()
     services = grouped.get(category, [])
     markup = telebot.types.InlineKeyboardMarkup(row_width=1)
-    for service in services:
+    total_pages = max(1, (len(services) + page_size - 1) // page_size)
+    page = max(0, min(page, total_pages - 1))
+    start = page * page_size
+    end = start + page_size
+    for service in services[start:end]:
         markup.add(telebot.types.InlineKeyboardButton(
             service["name"],
             callback_data=f"svc_catalog_service:{service['_id']}"
         ))
+
+    if total_pages > 1:
+        nav_row = []
+        nav_row.append(telebot.types.InlineKeyboardButton(
+            "⬅️ Previous" if page > 0 else "⬅️ Previous",
+            callback_data=f"svc_catalog_category_page:{category}:{page - 1}" if page > 0 else "svc_catalog_page_disabled"
+        ))
+        nav_row.append(telebot.types.InlineKeyboardButton(
+            "➡️ Next" if page + 1 < total_pages else "➡️ Next",
+            callback_data=f"svc_catalog_category_page:{category}:{page + 1}" if page + 1 < total_pages else "svc_catalog_page_disabled"
+        ))
+        markup.row(*nav_row)
+
     markup.add(telebot.types.InlineKeyboardButton("⬅️ Back", callback_data="svc_catalog_home"))
     markup.add(telebot.types.InlineKeyboardButton("🏠 Home", callback_data="svc_catalog_home"))
     return markup
@@ -761,11 +826,32 @@ def service_catalog_entry(message):
 @safe_callback
 def service_catalog_home_callback(call):
     bot.edit_message_text(
-        "🏠 <b>Main Menu</b>",
+        "🛍 <b>Services</b>\n\nSelect a category:",
         call.message.chat.id,
         call.message.message_id,
-        reply_markup=main_menu()
+        reply_markup=service_catalog_home_markup()
     )
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("svc_catalog_home_page:"))
+@safe_callback
+def service_catalog_home_page_callback(call):
+    try:
+        page = int(call.data.split(":", 1)[1])
+    except (TypeError, ValueError):
+        page = 0
+    bot.edit_message_text(
+        "🛍 <b>Services</b>\n\nSelect a category:",
+        call.message.chat.id,
+        call.message.message_id,
+        reply_markup=service_catalog_home_markup(page=page)
+    )
+
+
+@bot.callback_query_handler(func=lambda c: c.data == "svc_catalog_home_disabled")
+@safe_callback
+def service_catalog_home_disabled_callback(call):
+    bot.answer_callback_query(call.id, "No more categories to show.")
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("svc_catalog_category:"))
@@ -785,6 +871,35 @@ def service_catalog_category_callback(call):
         call.message.message_id,
         reply_markup=service_catalog_category_markup(category)
     )
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("svc_catalog_category_page:"))
+@safe_callback
+def service_catalog_category_page_callback(call):
+    try:
+        _, category, page_str = call.data.split(":", 2)
+        page = int(page_str)
+    except (TypeError, ValueError):
+        category = call.data.split(":", 1)[1]
+        page = 0
+    grouped = get_enabled_services_by_category()
+    services = grouped.get(category, [])
+    if not services:
+        bot.answer_callback_query(call.id, "❌ No services in this category.")
+        return
+    text = f"📂 <b>{escape(category)}</b>\n\nSelect a service:"
+    bot.edit_message_text(
+        text,
+        call.message.chat.id,
+        call.message.message_id,
+        reply_markup=service_catalog_category_markup(category, page=page)
+    )
+
+
+@bot.callback_query_handler(func=lambda c: c.data == "svc_catalog_page_disabled")
+@safe_callback
+def service_catalog_page_disabled_callback(call):
+    bot.answer_callback_query(call.id, "No more services to show.")
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("svc_catalog_service:"))
@@ -2352,11 +2467,6 @@ def send_welcome(message):
     else:
         display_name = "Anonymous"
 
-    if user_id in users and user_has_joined_all_channels(user_id):
-        if len(text) > 1:
-            bot.send_message(user_id, "❌ 𝙔𝙊𝙐 𝙃𝘼𝙑𝙀 𝘼𝙇𝙍𝙀𝘼𝘿𝙔 𝙎𝙏𝘼𝙍𝙏𝙀𝘿 𝙏𝙃𝙀 𝘽𝙊𝙏!")
-        return
-
     if user_id not in users:
         users.add(user_id)
         persist_user(user_id)
@@ -2401,7 +2511,7 @@ def joined_button_handler(call):
     except Exception:
         pass
 
-    bot.send_message(user_id, "✅ 𝗪𝗘𝗟𝗖𝗢𝗠𝗘 𝗧𝗢 𝗔𝗖𝗖𝗘𝗦𝗦 𝗽𝗔𝗡𝗘𝗟 🌸", reply_markup=main_menu())
+    bot.send_message(user_id, "🏠 <b>Main Menu</b>", reply_markup=main_menu())
 
     try:
         first_name = call.message.chat.first_name or str(user_id)
@@ -2426,6 +2536,22 @@ def joined_button_handler(call):
                 bot.send_message(referrer_id, f"✅ You received <b>{reward} points</b> for a referral!")
             except Exception:
                 pass
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("main_menu_"))
+@safe_callback
+def main_menu_action_callback(call):
+    action_text = {
+        "main_menu_my_orders": "📦 My Orders",
+        "main_menu_check_balance": "💰 Check Balance",
+        "main_menu_add_funds": "➕ Add Funds",
+        "main_menu_refer": "📢 Refer & Earn",
+        "main_menu_search": "🔎 Search Service",
+    }.get(call.data)
+    if not action_text:
+        return
+    bot.answer_callback_query(call.id)
+    trigger_main_menu_action(call, action_text)
 
 
 # ─────────────────────────────────────────────────────────────
