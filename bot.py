@@ -691,6 +691,7 @@ def admin_panel_markup():
     )
     mk.add(
         telebot.types.InlineKeyboardButton("🧰 Manage Services",  callback_data="ap_services"),
+        telebot.types.InlineKeyboardButton("🔄 Sync Services",    callback_data="ap_sync_services"),
     )
     mk.add(
         telebot.types.InlineKeyboardButton("🎁 Create GiftCode",  callback_data="ap_giftcode_create"),
@@ -794,6 +795,141 @@ def pending_reservation_detail_markup(reservation_id):
 # ─────────────────────────────────────────────────────────────
 #  SERVICE MANAGEMENT
 # ─────────────────────────────────────────────────────────────
+def _safe_int(value, default=None):
+    if value is None or value is False or value == "":
+        return default
+    if isinstance(value, bool):
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _safe_float(value, default=0.0):
+    if value is None or value is False or value == "":
+        return default
+    if isinstance(value, bool):
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def normalize_provider_service_payload(payload):
+    if isinstance(payload, list):
+        candidates = payload
+    elif isinstance(payload, dict):
+        if isinstance(payload.get("services"), list):
+            candidates = payload["services"]
+        elif isinstance(payload.get("data"), list):
+            candidates = payload["data"]
+        elif isinstance(payload.get("result"), list):
+            candidates = payload["result"]
+        elif isinstance(payload.get("items"), list):
+            candidates = payload["items"]
+        else:
+            candidates = [payload]
+    else:
+        return []
+
+    normalized = []
+    for item in candidates:
+        if not isinstance(item, dict):
+            continue
+        provider_id = (
+            _safe_int(item.get("provider_service_id"))
+            or _safe_int(item.get("service_id"))
+            or _safe_int(item.get("id"))
+            or _safe_int(item.get("service"))
+        )
+        if provider_id is None:
+            continue
+
+        name = (
+            item.get("name")
+            or item.get("service_name")
+            or item.get("title")
+            or item.get("service")
+            or f"Service {provider_id}"
+        )
+        category = (
+            item.get("category")
+            or item.get("type")
+            or item.get("service_type")
+            or "General"
+        )
+        minimum = _safe_int(item.get("min"), 1) or 1
+        maximum = _safe_int(item.get("max"), minimum) or minimum
+        if maximum < minimum:
+            maximum = minimum
+        price = _safe_float(item.get("price"), _safe_float(item.get("cost"), 1.0))
+        if price <= 0:
+            price = 1.0
+
+        normalized.append({
+            "provider_service_id": provider_id,
+            "name": str(name),
+            "category": str(category),
+            "min": minimum,
+            "max": maximum,
+            "price": price,
+        })
+    return normalized
+
+
+def sync_provider_services():
+    base_url = (cfg.get("smm_panel_url") or "").strip()
+    api_key = (cfg.get("smm_api_key") or "").strip()
+    if not base_url or not api_key:
+        return {"ok": False, "error": "SMM panel URL or API key is not configured."}
+
+    try:
+        response = requests.post(base_url, data={"key": api_key, "action": "services"}, timeout=20)
+        response.raise_for_status()
+    except requests.RequestException as exc:
+        return {"ok": False, "error": f"Provider request failed: {exc}"}
+
+    try:
+        payload = response.json()
+    except ValueError:
+        return {"ok": False, "error": "Provider returned a non-JSON response."}
+
+    if isinstance(payload, dict) and payload.get("error"):
+        return {"ok": False, "error": str(payload["error"]) }
+
+    normalized = normalize_provider_service_payload(payload)
+    if not normalized:
+        return {"ok": False, "error": "Provider did not return any valid services."}
+
+    inserted = 0
+    updated = 0
+    for service in normalized:
+        existing = services_collection.find_one({"provider_service_id": service["provider_service_id"]})
+        service_payload = {
+            "name": service["name"],
+            "provider_service_id": service["provider_service_id"],
+            "category": service["category"],
+            "min": service["min"],
+            "max": service["max"],
+            "price": service["price"],
+            "enabled": existing.get("enabled", True) if existing else True,
+        }
+        if existing:
+            services_collection.update_one(
+                {"provider_service_id": service["provider_service_id"]},
+                {"$set": service_payload}
+            )
+            updated += 1
+        else:
+            service_payload["_id"] = uuid4().hex
+            services_collection.insert_one(service_payload)
+            inserted += 1
+
+    return {"ok": True, "inserted": inserted, "updated": updated, "total": len(normalized)}
+
+
 def services_admin_markup():
     mk = telebot.types.InlineKeyboardMarkup(row_width=1)
     services = list(services_collection.find({}).sort([("category", 1), ("name", 1)]))
@@ -803,6 +939,7 @@ def services_admin_markup():
             f"{status} {service['name']}",
             callback_data=f"svc_admin_edit:{service['_id']}"
         ))
+    mk.add(telebot.types.InlineKeyboardButton("🔄 Sync Services", callback_data="ap_sync_services"))
     mk.add(telebot.types.InlineKeyboardButton("➕ Add Service", callback_data="svc_admin_add"))
     mk.add(telebot.types.InlineKeyboardButton("🔙 Back", callback_data="ap_back"))
     return mk
@@ -871,6 +1008,28 @@ def admin_callback(call):
     data = call.data
 
     # ── Service management ──
+    if data == "ap_sync_services":
+        result = sync_provider_services()
+        if not result["ok"]:
+            bot.edit_message_text(
+                f"⚠️ <b>Service Sync Failed</b>\n\n{escape(str(result['error']))}",
+                uid,
+                call.message.message_id,
+                reply_markup=admin_panel_markup()
+            )
+            return
+
+        bot.edit_message_text(
+            f"✅ <b>Provider Services Synced</b>\n\n"
+            f"Inserted: <b>{result['inserted']}</b>\n"
+            f"Updated: <b>{result['updated']}</b>\n"
+            f"Available from provider: <b>{result['total']}</b>",
+            uid,
+            call.message.message_id,
+            reply_markup=admin_panel_markup()
+        )
+        return
+
     if data == "ap_services":
         bot.edit_message_text(
             services_admin_text(), uid, call.message.message_id,
