@@ -503,7 +503,7 @@ MAIN_COMMANDS = [
     "👍 Order Reactions", "👀 Order Views", "👥 Order Members",
     "💰 Check Balance", "🎁 Claim Bonus", "➕ Add Funds",
     "📢 Refer & Earn", "🔳 GiftCode", "💬 Feedback", "🔎 Search Service",
-    "🖲 Track Order", "📜 Order History"
+    "� Services", "�🖲 Track Order", "📜 Order History"
 ]
 
 # ─────────────────────────────────────────────────────────────
@@ -672,12 +672,145 @@ def main_menu():
     enabled_services = get_enabled_services()
     for index in range(0, len(enabled_services), 3):
         markup.row(*(service["name"] for service in enabled_services[index:index + 3]))
+    markup.row("� Services")
     markup.row("🔎 Search Service")
     markup.row("💰 Check Balance", "🎁 Claim Bonus")
     markup.row("➕ Add Funds", "📢 Refer & Earn")
     markup.row("🔳 GiftCode", "💬 Feedback")
     markup.row("🖲 Track Order", "📜 Order History")
     return markup
+
+
+def get_enabled_services_by_category():
+    services = list(services_collection.find({"enabled": True}).sort([("category", 1), ("name", 1)]))
+    grouped = {}
+    for service in services:
+        category = str(service.get("category") or "General").strip() or "General"
+        grouped.setdefault(category, []).append(service)
+    return grouped
+
+
+def service_catalog_home_markup():
+    grouped = get_enabled_services_by_category()
+    markup = telebot.types.InlineKeyboardMarkup(row_width=1)
+    if not grouped:
+        markup.add(telebot.types.InlineKeyboardButton("🏠 Home", callback_data="svc_catalog_home"))
+        return markup
+
+    for category in sorted(grouped.keys(), key=lambda text: text.lower()):
+        services_count = len(grouped[category])
+        markup.add(telebot.types.InlineKeyboardButton(
+            f"{category} ({services_count})",
+            callback_data=f"svc_catalog_category:{category}"
+        ))
+    markup.add(telebot.types.InlineKeyboardButton("🏠 Home", callback_data="svc_catalog_home"))
+    return markup
+
+
+def service_catalog_category_markup(category):
+    grouped = get_enabled_services_by_category()
+    services = grouped.get(category, [])
+    markup = telebot.types.InlineKeyboardMarkup(row_width=1)
+    for service in services:
+        markup.add(telebot.types.InlineKeyboardButton(
+            service["name"],
+            callback_data=f"svc_catalog_service:{service['_id']}"
+        ))
+    markup.add(telebot.types.InlineKeyboardButton("⬅️ Back", callback_data="svc_catalog_home"))
+    markup.add(telebot.types.InlineKeyboardButton("🏠 Home", callback_data="svc_catalog_home"))
+    return markup
+
+
+def service_catalog_details_markup(service_id, category):
+    markup = telebot.types.InlineKeyboardMarkup(row_width=1)
+    markup.add(telebot.types.InlineKeyboardButton(
+        "⬅️ Back",
+        callback_data=f"svc_catalog_category:{category}"
+    ))
+    markup.add(telebot.types.InlineKeyboardButton("🏠 Home", callback_data="svc_catalog_home"))
+    return markup
+
+
+def send_service_catalog_home(message):
+    grouped = get_enabled_services_by_category()
+    if not grouped:
+        bot.send_message(
+            message.chat.id,
+            "🛍 <b>Services</b>\n\nNo enabled services are available right now.",
+            reply_markup=main_menu()
+        )
+        return
+
+    lines = ["🛍 <b>Services</b>", "Select a category:"]
+    text = "\n".join(lines)
+    bot.send_message(message.chat.id, text, reply_markup=service_catalog_home_markup())
+
+
+@bot.message_handler(func=lambda m: m.text == "🛍 Services")
+@safe_handler
+@require_not_banned
+def service_catalog_entry(message):
+    send_service_catalog_home(message)
+
+
+@bot.callback_query_handler(func=lambda c: c.data == "svc_catalog_home")
+@safe_callback
+def service_catalog_home_callback(call):
+    bot.edit_message_text(
+        "🏠 <b>Main Menu</b>",
+        call.message.chat.id,
+        call.message.message_id,
+        reply_markup=main_menu()
+    )
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("svc_catalog_category:"))
+@safe_callback
+def service_catalog_category_callback(call):
+    category = call.data.split(":", 1)[1]
+    grouped = get_enabled_services_by_category()
+    services = grouped.get(category, [])
+    if not services:
+        bot.answer_callback_query(call.id, "❌ No services in this category.")
+        return
+
+    text = f"📂 <b>{escape(category)}</b>\n\nSelect a service:"
+    bot.edit_message_text(
+        text,
+        call.message.chat.id,
+        call.message.message_id,
+        reply_markup=service_catalog_category_markup(category)
+    )
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("svc_catalog_service:"))
+@safe_callback
+def service_catalog_service_callback(call):
+    service_id = call.data.split(":", 1)[1]
+    service = get_service_by_id(service_id, enabled_only=True)
+    if not service:
+        bot.answer_callback_query(call.id, "❌ This service is no longer available.")
+        return
+
+    category = str(service.get("category") or "General").strip() or "General"
+    lines = [
+        f"📦 <b>{escape(str(service['name']))}</b>",
+        f"Category: <b>{escape(category)}</b>",
+        f"Min: <b>{service.get('min', 'N/A')}</b>",
+        f"Max: <b>{service.get('max', 'N/A')}</b>",
+        f"Price: <b>{service.get('price', 'N/A')}</b> units per point",
+    ]
+    description = str(service.get("description") or "").strip()
+    if description:
+        lines.append("")
+        lines.append(f"Description: <i>{escape(description)}</i>")
+
+    bot.edit_message_text(
+        "\n".join(lines),
+        call.message.chat.id,
+        call.message.message_id,
+        reply_markup=service_catalog_details_markup(service_id, category)
+    )
 
 
 # ─────────────────────────────────────────────────────────────
