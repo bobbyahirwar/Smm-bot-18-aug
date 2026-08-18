@@ -724,6 +724,10 @@ def service_catalog_category_markup(category):
 def service_catalog_details_markup(service_id, category):
     markup = telebot.types.InlineKeyboardMarkup(row_width=1)
     markup.add(telebot.types.InlineKeyboardButton(
+        "🛒 Order Now",
+        callback_data=f"svc_catalog_order_now:{service_id}"
+    ))
+    markup.add(telebot.types.InlineKeyboardButton(
         "⬅️ Back",
         callback_data=f"svc_catalog_category:{category}"
     ))
@@ -811,6 +815,362 @@ def service_catalog_service_callback(call):
         call.message.message_id,
         reply_markup=service_catalog_details_markup(service_id, category)
     )
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("svc_catalog_order_now:"))
+@safe_callback
+def service_catalog_order_now_callback(call):
+    service_id = call.data.split(":", 1)[1]
+    service = get_service_by_id(service_id, enabled_only=True)
+    if not service:
+        bot.answer_callback_query(call.id, "❌ This service is no longer available.")
+        return
+
+    user_id = call.message.chat.id
+    user_state[user_id] = {
+        "action": "catalog_order",
+        "service_id": service_id,
+        "service_name": service["name"],
+        "service_min": service["min"],
+        "service_max": service["max"],
+        "points_per_unit": service["price"],
+        "step": "awaiting_link",
+        "link": "",
+        "quantity": None,
+    }
+    bot.answer_callback_query(call.id)
+    bot.send_message(
+        user_id,
+        f"📦 <b>{escape(str(service['name']))}</b>\n\nSend the required link or username for this order:"
+    )
+
+
+@bot.message_handler(func=lambda m: (
+    user_state.get(m.chat.id) is not None and
+    user_state.get(m.chat.id, {}).get("action") == "catalog_order"
+))
+@safe_handler
+def handle_catalog_order(message):
+    user_id = message.chat.id
+    state = user_state.get(user_id)
+    if not state:
+        return
+
+    if message.content_type != "text":
+        bot.send_message(user_id, "❌ Please send text only.")
+        return
+
+    if state.get("step") == "awaiting_link":
+        link = message.text.strip()
+        if not link:
+            bot.send_message(user_id, "❌ Please provide a valid link or username.")
+            return
+        state["link"] = link
+        state["step"] = "awaiting_quantity"
+        bot.send_message(
+            user_id,
+            f"📏 Enter the quantity for <b>{escape(str(state['service_name']))}</b>\n"
+            f"Min: <b>{state['service_min']}</b> | Max: <b>{state['service_max']}</b>"
+        )
+        return
+
+    if state.get("step") == "awaiting_quantity":
+        text = message.text.strip()
+        if not text.isdigit():
+            bot.send_message(user_id, "❌ Please enter a number only.")
+            return
+        quantity = int(text)
+        service = get_service_by_id(state["service_id"], enabled_only=True)
+        if not service:
+            user_state.pop(user_id, None)
+            bot.send_message(user_id, "❌ This service is no longer available.")
+            return
+
+        if quantity < state["service_min"]:
+            bot.send_message(user_id, f"❌ Minimum order quantity is {state['service_min']}.")
+            return
+        if quantity > state["service_max"]:
+            bot.send_message(user_id, f"❌ Maximum order quantity is {state['service_max']}.")
+            return
+
+        state["quantity"] = quantity
+        state["step"] = "summary"
+        current_price = quantity / state["points_per_unit"]
+        markup = telebot.types.InlineKeyboardMarkup(row_width=2)
+        markup.add(
+            telebot.types.InlineKeyboardButton("✅ Confirm", callback_data="svc_catalog_confirm_order"),
+            telebot.types.InlineKeyboardButton("❌ Cancel", callback_data="svc_catalog_cancel_order"),
+        )
+        markup.add(
+            telebot.types.InlineKeyboardButton("⬅️ Back", callback_data="svc_catalog_back_order"),
+            telebot.types.InlineKeyboardButton("🏠 Home", callback_data="svc_catalog_home"),
+        )
+        bot.send_message(
+            user_id,
+            "🧾 <b>Order Summary</b>\n\n"
+            f"Service: <b>{escape(str(service['name']))}</b>\n"
+            f"Link/Username: <code>{escape(str(state['link']))}</code>\n"
+            f"Quantity: <b>{quantity}</b>\n"
+            f"Current price: <b>{current_price:.2f}</b> points\n\n"
+            "Please confirm this order.",
+            reply_markup=markup,
+            disable_web_page_preview=True,
+        )
+        return
+
+    if state.get("step") == "summary":
+        bot.send_message(user_id, "⚠️ Please confirm, cancel, or go back from the order summary.")
+
+
+@bot.callback_query_handler(func=lambda c: c.data == "svc_catalog_cancel_order")
+@safe_callback
+def service_catalog_cancel_order_callback(call):
+    user_state.pop(call.message.chat.id, None)
+    bot.edit_message_text(
+        "❌ Order cancelled.",
+        call.message.chat.id,
+        call.message.message_id,
+        reply_markup=main_menu()
+    )
+
+
+@bot.callback_query_handler(func=lambda c: c.data == "svc_catalog_back_order")
+@safe_callback
+def service_catalog_back_order_callback(call):
+    state = user_state.get(call.message.chat.id)
+    if not state or state.get("action") != "catalog_order":
+        bot.answer_callback_query(call.id, "❌ No active order to edit.")
+        return
+    state["step"] = "awaiting_quantity"
+    bot.edit_message_text(
+        f"📏 Enter the quantity for <b>{escape(str(state['service_name']))}</b>\n"
+        f"Min: <b>{state['service_min']}</b> | Max: <b>{state['service_max']}</b>",
+        call.message.chat.id,
+        call.message.message_id,
+    )
+
+
+@bot.callback_query_handler(func=lambda c: c.data == "svc_catalog_confirm_order")
+@safe_callback
+def service_catalog_confirm_order_callback(call):
+    user_id = call.message.chat.id
+    state = user_state.get(user_id)
+    if not state or state.get("action") != "catalog_order":
+        bot.answer_callback_query(call.id, "❌ No active order to confirm.")
+        return
+
+    service = get_service_by_id(state["service_id"], enabled_only=True)
+    if not service:
+        user_state.pop(user_id, None)
+        bot.answer_callback_query(call.id, "❌ This service is no longer available.")
+        return
+
+    quantity = state.get("quantity")
+    link = state.get("link")
+    if quantity is None or not link:
+        bot.answer_callback_query(call.id, "❌ The order is incomplete.")
+        return
+
+    state["action"] = "order"
+    state["service_id"] = service["_id"]
+    state["service_name"] = service["name"]
+    state["service_min"] = service["min"]
+    state["service_max"] = service["max"]
+    state["points_per_unit"] = service["price"]
+    state["step"] = "awaiting_quantity"
+    state["url"] = link
+
+    # Reuse the existing order placement logic after quantity validation.
+    result = place_order_for_user(user_id, state, service, link, quantity)
+    if result is False:
+        return
+    user_state.pop(user_id, None)
+    bot.answer_callback_query(call.id, "✅ Order confirmed.")
+
+
+@safe_handler
+def process_order_quantity(message):
+    reload_cfg()
+    user_id = message.chat.id
+    state   = user_state.get(user_id)
+    if not state or state.get("step") != "awaiting_quantity":
+        return
+    if message.content_type != 'text' or not message.text.strip().isdigit():
+        bot.send_message(user_id, "❌ Please enter numbers only.")
+        return
+    quantity = int(message.text.strip())
+    if quantity < state["service_min"]:
+        bot.send_message(user_id, f"❌ Minimum order quantity is {state['service_min']}.")
+        return
+    if quantity > state["service_max"]:
+        bot.send_message(user_id, f"❌ Maximum order quantity is {state['service_max']}.")
+        return
+
+    service = get_service_by_id(state["service_id"], enabled_only=True)
+    if not service:
+        user_state.pop(user_id, None)
+        bot.send_message(user_id, "❌ This service is no longer enabled.")
+        return
+
+    url = state["url"]
+    if not url:
+        bot.send_message(user_id, "❌ Missing link or username. Please try again.")
+        return
+
+    place_order_for_user(user_id, state, service, url, quantity)
+
+
+def place_order_for_user(user_id, state, service, url, quantity):
+    points_per_unit = state.get("points_per_unit", service["price"])
+    required_pts   = quantity / points_per_unit
+    try:
+        reservation = wallet_hold(user_id, required_pts)
+    except Exception:
+        bot.send_message(user_id, "❌ Unable to reserve points right now. Please try again.")
+        user_state.pop(user_id, None)
+        return False
+    if not reservation:
+        current_user = users_collection.find_one({"_id": user_id}) or {}
+        available = float(current_user.get("balance", user_balances.get(user_id, 0)))
+        user_balances[user_id] = available
+        bot.send_message(
+            user_id,
+            f"❌ Insufficient points. You need <b>{required_pts:.2f}</b> pts "
+            f"but have <b>{available:.2f}</b>."
+        )
+        user_state.pop(user_id, None)
+        return False
+
+    reservation_id = reservation["reservation_id"]
+    user_state.pop(user_id, None)
+
+    provider_request_id = uuid4().hex
+    if not wallet_mark_request_attempted(reservation_id, provider_request_id):
+        bot.send_message(
+            user_id,
+            f"⚠️ This reservation already has a pending provider request.\n"
+            f"Reservation ID: <code>{reservation_id}</code>\n"
+            f"Use Retry to check its status.",
+            reply_markup=pending_reservation_markup(reservation_id)
+        )
+        return False
+
+    order_data = {
+        "key":      cfg["smm_api_key"],
+        "action":   "add",
+        "service":  service["provider_service_id"],
+        "link":     url,
+        "quantity": quantity
+    }
+    try:
+        provider_response = requests.post(
+            cfg["smm_panel_url"], data=order_data, timeout=15
+        )
+    except requests.RequestException:
+        wallet_mark_pending(reservation_id, "timeout_or_connection")
+        bot.send_message(
+            user_id,
+            f"⚠️ Provider response is pending. Your <b>{required_pts:.2f}</b> "
+            f"points remain reserved.\nReservation ID: <code>{reservation_id}</code>",
+            reply_markup=pending_reservation_markup(reservation_id)
+        )
+        return False
+
+    try:
+        response = provider_response.json()
+    except (AttributeError, TypeError, ValueError):
+        wallet_mark_pending(reservation_id, "malformed_or_truncated_response")
+        bot.send_message(
+            user_id,
+            f"⚠️ Provider response could not be verified. Your <b>{required_pts:.2f}</b> "
+            f"points remain reserved.\nReservation ID: <code>{reservation_id}</code>",
+            reply_markup=pending_reservation_markup(reservation_id)
+        )
+        return False
+
+    if not isinstance(response, dict):
+        wallet_mark_pending(reservation_id, "malformed_or_truncated_response")
+        bot.send_message(
+            user_id,
+            f"⚠️ Provider response could not be verified. Your <b>{required_pts:.2f}</b> "
+            f"points remain reserved.\nReservation ID: <code>{reservation_id}</code>",
+            reply_markup=pending_reservation_markup(reservation_id)
+        )
+        return False
+
+    raw_order_id = response.get("order")
+    has_order_id = (
+        isinstance(raw_order_id, (str, int)) and
+        not isinstance(raw_order_id, bool) and
+        bool(str(raw_order_id).strip())
+    )
+    raw_error = response.get("error")
+    has_explicit_error = isinstance(raw_error, str) and bool(raw_error.strip())
+    if has_order_id and not has_explicit_error:
+        order_id = raw_order_id
+        if not wallet_settle(reservation_id, order_id):
+            wallet_mark_pending(reservation_id, "settlement_conflict")
+            bot.send_message(
+                user_id,
+                f"⚠️ Order result could not be finalized. Your <b>{required_pts:.2f}</b> "
+                f"points remain reserved.\nReservation ID: <code>{reservation_id}</code>",
+                reply_markup=pending_reservation_markup(reservation_id)
+            )
+            return False
+    elif has_explicit_error and not has_order_id:
+        wallet_release(reservation_id, order_id=None)
+        bot.send_message(
+            user_id,
+            f"❌ Order failed. Points released.\nError: {raw_error}"
+        )
+        return False
+    else:
+        wallet_mark_pending(reservation_id, "ambiguous_provider_response")
+        bot.send_message(
+            user_id,
+            f"⚠️ Provider response was ambiguous. Your <b>{required_pts:.2f}</b> "
+            f"points remain reserved.\nReservation ID: <code>{reservation_id}</code>",
+            reply_markup=pending_reservation_markup(reservation_id)
+        )
+        return False
+
+    if "order" in response:
+        ts       = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        order_details = {
+            "order_id":    order_id,
+            "service_type": service["name"],
+            "service_name": service["name"],
+            "reservation_id": reservation_id,
+            "link":        url,
+            "quantity":    quantity,
+            "timestamp":   ts
+        }
+        user_orders.setdefault(user_id, []).append(order_details)
+        persist_order(user_id, order_details)
+
+        bot.send_message(user_id,
+            f"✅ 𝗢𝗥𝗗𝗘𝗥 𝗣𝗟𝗔𝗖𝗘𝗗 🦋\n"
+            f"Service: {service['name']}\n"
+            f"Quantity: {quantity}\n"
+            f"Order ID: <code>{order_id}</code>\n"
+            f"Estimated time: 2-3 hours"
+        )
+
+        admin_text = (
+            f"🛒 <b>NEW ORDER</b>\n"
+            f"👤 User: <a href='tg://user?id={user_id}'>{user_id}</a>\n"
+            f"Service: {service['name']}\n"
+            f"Quantity: {quantity}\n"
+            f"Link: <code>{escape(url)}</code>\n"
+            f"Order ID: <code>{order_id}</code>"
+        )
+        try:
+            send_log(admin_text)
+        except Exception:
+            pass
+        return True
+
+    return False
 
 
 # ─────────────────────────────────────────────────────────────
