@@ -711,6 +711,30 @@ def trigger_main_menu_action(call, action_text):
         search_service(message)
 
 
+def get_enabled_service_categories():
+    grouped = get_enabled_services_by_category()
+    return sorted(grouped.keys(), key=lambda text: text.lower())
+
+
+def get_category_id_from_name(category_name):
+    categories = get_enabled_service_categories()
+    try:
+        return categories.index(str(category_name))
+    except ValueError:
+        return 0
+
+
+def get_category_name_from_id(category_id):
+    try:
+        category_id = int(category_id)
+    except (TypeError, ValueError):
+        return None
+    categories = get_enabled_service_categories()
+    if 0 <= category_id < len(categories):
+        return categories[category_id]
+    return None
+
+
 def get_enabled_services_by_category():
     services = list(services_collection.find({"enabled": True}).sort([("category", 1), ("name", 1)]))
     grouped = {}
@@ -723,7 +747,7 @@ def get_enabled_services_by_category():
 def service_catalog_home_markup(page=0, page_size=6):
     grouped = get_enabled_services_by_category()
     markup = telebot.types.InlineKeyboardMarkup(row_width=1)
-    categories = sorted(grouped.keys(), key=lambda text: text.lower())
+    categories = get_enabled_service_categories()
     if not categories:
         markup.add(telebot.types.InlineKeyboardButton("🏠 Home", callback_data="svc_catalog_home"))
         return markup
@@ -732,11 +756,11 @@ def service_catalog_home_markup(page=0, page_size=6):
     page = max(0, min(page, total_pages - 1))
     start = page * page_size
     end = start + page_size
-    for category in categories[start:end]:
+    for category_id, category in enumerate(categories[start:end], start=start):
         services_count = len(grouped[category])
         markup.add(telebot.types.InlineKeyboardButton(
             f"{category} ({services_count})",
-            callback_data=f"svc_catalog_category:{category}"
+            callback_data=f"svc_catalog_category:{category_id}"
         ))
 
     if total_pages > 1:
@@ -763,6 +787,7 @@ def service_catalog_category_markup(category, page=0, page_size=6):
     page = max(0, min(page, total_pages - 1))
     start = page * page_size
     end = start + page_size
+    category_id = get_category_id_from_name(category)
     for service in services[start:end]:
         markup.add(telebot.types.InlineKeyboardButton(
             service["name"],
@@ -773,11 +798,11 @@ def service_catalog_category_markup(category, page=0, page_size=6):
         nav_row = []
         nav_row.append(telebot.types.InlineKeyboardButton(
             "⬅️ Previous" if page > 0 else "⬅️ Previous",
-            callback_data=f"svc_catalog_category_page:{category}:{page - 1}" if page > 0 else "svc_catalog_page_disabled"
+            callback_data=f"svc_catalog_category_page:{category_id}:{page - 1}" if page > 0 else "svc_catalog_page_disabled"
         ))
         nav_row.append(telebot.types.InlineKeyboardButton(
             "➡️ Next" if page + 1 < total_pages else "➡️ Next",
-            callback_data=f"svc_catalog_category_page:{category}:{page + 1}" if page + 1 < total_pages else "svc_catalog_page_disabled"
+            callback_data=f"svc_catalog_category_page:{category_id}:{page + 1}" if page + 1 < total_pages else "svc_catalog_page_disabled"
         ))
         markup.row(*nav_row)
 
@@ -787,6 +812,7 @@ def service_catalog_category_markup(category, page=0, page_size=6):
 
 
 def service_catalog_details_markup(service_id, category):
+    category_id = get_category_id_from_name(category)
     markup = telebot.types.InlineKeyboardMarkup(row_width=1)
     markup.add(telebot.types.InlineKeyboardButton(
         "🛒 Order Now",
@@ -794,7 +820,7 @@ def service_catalog_details_markup(service_id, category):
     ))
     markup.add(telebot.types.InlineKeyboardButton(
         "⬅️ Back",
-        callback_data=f"svc_catalog_category:{category}"
+        callback_data=f"svc_catalog_category:{category_id}"
     ))
     markup.add(telebot.types.InlineKeyboardButton("🏠 Home", callback_data="svc_catalog_home"))
     return markup
@@ -857,7 +883,12 @@ def service_catalog_home_disabled_callback(call):
 @bot.callback_query_handler(func=lambda c: c.data.startswith("svc_catalog_category:"))
 @safe_callback
 def service_catalog_category_callback(call):
-    category = call.data.split(":", 1)[1]
+    category_id = call.data.split(":", 1)[1]
+    category = get_category_name_from_id(category_id)
+    if category is None:
+        bot.answer_callback_query(call.id, "❌ Invalid category.")
+        return
+
     grouped = get_enabled_services_by_category()
     services = grouped.get(category, [])
     if not services:
@@ -877,11 +908,17 @@ def service_catalog_category_callback(call):
 @safe_callback
 def service_catalog_category_page_callback(call):
     try:
-        _, category, page_str = call.data.split(":", 2)
+        _, category_id, page_str = call.data.split(":", 2)
         page = int(page_str)
     except (TypeError, ValueError):
-        category = call.data.split(":", 1)[1]
-        page = 0
+        bot.answer_callback_query(call.id, "❌ Invalid category page.")
+        return
+
+    category = get_category_name_from_id(category_id)
+    if category is None:
+        bot.answer_callback_query(call.id, "❌ Invalid category.")
+        return
+
     grouped = get_enabled_services_by_category()
     services = grouped.get(category, [])
     if not services:
