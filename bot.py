@@ -313,6 +313,12 @@ def wallet_hold(user_id, amount, order_id=None, reservation_id=None):
                 )
 
         user_balances[user_id] = float(updated_user["balance"])
+        send_log(
+            f"💰 <b>Wallet debited</b>\n"
+            f"User: <code>{user_id}</code>\n"
+            f"Amount: ₹{amount:.2f}\n"
+            f"Reservation: <code>{reservation_id}</code>"
+        )
     return {
         "reservation_id": reservation_id,
         "amount": amount,
@@ -398,6 +404,12 @@ def wallet_release(reservation_id, order_id=None):
                         session=session,
                     )
                     user_balances[reservation["user_id"]] = float(updated_user["balance"])
+                    send_log(
+                        f"💰 <b>Wallet credited</b>\n"
+                        f"User: <code>{reservation['user_id']}</code>\n"
+                        f"Amount: ₹{float(reservation['amount']):.2f}\n"
+                        f"Reservation: <code>{reservation_id}</code>"
+                    )
                     return True
 
                 existing = wallet_reservations_collection.find_one(
@@ -642,6 +654,7 @@ def safe_handler(func):
             return func(message, *args, **kwargs)
         except Exception as e:
             print(f"[HANDLER ERROR] {func.__name__}: {e}")
+            send_log(f"⚠️ <b>Bot error</b>\nHandler: <code>{func.__name__}</code>\nError type: <code>{type(e).__name__}</code>")
             try:
                 bot.send_message(message.chat.id, "❌ Something went wrong. Please try again.")
             except Exception:
@@ -655,6 +668,7 @@ def safe_callback(func):
             return func(call, *args, **kwargs)
         except Exception as e:
             print(f"[CALLBACK ERROR] {func.__name__}: {e}")
+            send_log(f"⚠️ <b>Bot error</b>\nCallback: <code>{func.__name__}</code>\nError type: <code>{type(e).__name__}</code>")
             try:
                 bot.answer_callback_query(call.id, "❌ Something went wrong.")
             except Exception:
@@ -1537,6 +1551,14 @@ def place_order_for_user(user_id, state, service, url, quantity):
             return False
     elif has_explicit_error and not has_order_id:
         wallet_release(reservation_id, order_id=None)
+        send_log(
+            f"❌ <b>Order failed</b>\n"
+            f"User ID: <code>{user_id}</code>\n"
+            f"Service: <b>{escape(str(service['name']))}</b>\n"
+            f"Quantity: {quantity}\n"
+            f"Charged: ₹{charged_amount:.2f}\n"
+            f"Status: failed"
+        )
         bot.send_message(
             user_id,
             f"❌ Order failed. ₹ balance released.\nError: {raw_error}"
@@ -1568,7 +1590,15 @@ def place_order_for_user(user_id, state, service, url, quantity):
         }
         user_orders.setdefault(user_id, []).append(order_details)
         persist_order(user_id, order_details)
-
+        send_log(
+            f"🛒 <b>Order placed</b>\n"
+            f"User ID: <code>{user_id}</code>\n"
+            f"Order ID: <code>{order_id}</code>\n"
+            f"Service: <b>{escape(str(service['name']))}</b>\n"
+            f"Quantity: {quantity}\n"
+            f"Charged: ₹{charged_amount:.2f}\n"
+            f"Status: placed"
+        )
         bot.send_message(user_id,
             f"✅ 𝗢𝗥𝗗𝗘𝗥 𝗣𝗟𝗔𝗖𝗘𝗗 🦋\n"
             f"Service: {service['name']}\n"
@@ -1577,18 +1607,6 @@ def place_order_for_user(user_id, state, service, url, quantity):
             f"Estimated time: 2-3 hours"
         )
 
-        admin_text = (
-            f"🛒 <b>NEW ORDER</b>\n"
-            f"👤 User: <a href='tg://user?id={user_id}'>{user_id}</a>\n"
-            f"Service: {service['name']}\n"
-            f"Quantity: {quantity}\n"
-            f"Link: <code>{escape(url)}</code>\n"
-            f"Order ID: <code>{order_id}</code>"
-        )
-        try:
-            send_log(admin_text)
-        except Exception:
-            pass
         return True
 
     return False
@@ -1947,6 +1965,7 @@ def admin_callback(call):
     if data == "ap_sync_services":
         result = sync_provider_services()
         if not result["ok"]:
+            send_log(f"🔄 <b>Service sync failed</b>\nError: <code>{escape(str(result['error']))}</code>")
             bot.edit_message_text(
                 f"⚠️ <b>Service Sync Failed</b>\n\n{escape(str(result['error']))}",
                 uid,
@@ -1955,6 +1974,10 @@ def admin_callback(call):
             )
             return
 
+        send_log(
+            f"🔄 <b>Service sync succeeded</b>\n"
+            f"Inserted: {result['inserted']} | Updated: {result['updated']} | Total: {result['total']}"
+        )
         bot.edit_message_text(
             f"✅ <b>Provider Services Synced</b>\n\n"
             f"Inserted: <b>{result['inserted']}</b>\n"
@@ -2494,6 +2517,7 @@ def process_admin_add_bal(message):
         with wallet_balance_lock:
             user_balances[target_id] = user_balances.get(target_id, 0) + amount
             persist_user(target_id)
+        send_log(f"✅ <b>Payment approved / wallet credited</b>\nUser ID: <code>{target_id}</code>\nAmount: ₹{amount:.2f}")
         bot.send_message(uid, f"✅ Added <b>₹{amount:.2f}</b> to user <code>{target_id}</code>.\nNew balance: ₹{user_balances[target_id]:.2f}", reply_markup=admin_panel_markup())
         try:
             bot.send_message(target_id, f"🎉 Admin added <b>₹{amount:.2f}</b> to your account!")
@@ -2525,6 +2549,7 @@ def process_admin_rem_bal(message):
                         return
                     user_balances[target_id] = float(updated["balance"])
                     persist_user(target_id)
+                send_log(f"💰 <b>Wallet debited</b>\nUser ID: <code>{target_id}</code>\nAmount: ₹{amount:.2f}")
         bot.send_message(uid, f"✅ Removed <b>₹{amount:.2f}</b> from user <code>{target_id}</code>.\nNew balance: ₹{user_balances[target_id]:.2f}", reply_markup=admin_panel_markup())
         try:
             bot.send_message(target_id, f"⚠️ Admin deducted <b>₹{amount:.2f}</b> from your account.")
@@ -2818,6 +2843,11 @@ def send_welcome(message):
     if user_id not in users:
         users.add(user_id)
         persist_user(user_id)
+        send_log(
+            f"🆕 <b>New user</b>\n"
+            f"User ID: <code>{user_id}</code>\n"
+            f"Username: <code>{escape(display_name)}</code>"
+        )
 
     if len(text) > 1:
         ref_str = text[1]
@@ -2855,6 +2885,7 @@ def joined_button_handler(call):
     user_id = call.message.chat.id
 
     if not user_has_joined_all_channels(user_id):
+        send_log(f"🔐 <b>Force-join verification failed</b>\nUser ID: <code>{user_id}</code>")
         bot.answer_callback_query(call.id, "❌ Please join ALL channels first!")
         return
 
@@ -2865,14 +2896,11 @@ def joined_button_handler(call):
 
     send_main_menu(user_id, getattr(call.message.chat, "first_name", None))
 
-    try:
-        first_name = call.message.chat.first_name or str(user_id)
-        bot.send_message(primary_admin_id(),
-            f"ℹ️ User <a href='tg://user?id={user_id}'>{first_name}</a> joined and confirmed channels.",
-            disable_web_page_preview=True
-        )
-    except Exception:
-        pass
+    first_name = call.message.chat.first_name or str(user_id)
+    send_log(
+        f"🔐 <b>Force-join verification succeeded</b>\n"
+        f"User: <a href='tg://user?id={user_id}'>{escape(str(first_name))}</a>"
+    )
 
     # Reward referrer
     if user_id in user_referrals:
@@ -2884,6 +2912,12 @@ def joined_button_handler(call):
             user_referrals[user_id]["rewarded"] = True
             persist_user(referrer_id)
             persist_user(user_id)
+            send_log(
+                f"👥 <b>Referral reward credited</b>\n"
+                f"Referrer: <code>{referrer_id}</code>\n"
+                f"Referred user: <code>{user_id}</code>\n"
+                f"Amount: ₹{reward:.2f}"
+            )
             try:
                 bot.send_message(referrer_id, f"✅ You received <b>₹{reward:.2f}</b> referral reward!")
             except Exception:
@@ -3193,6 +3227,14 @@ def process_order_quantity(message):
             return
     elif has_explicit_error and not has_order_id:
         wallet_release(reservation_id, order_id=None)
+        send_log(
+            f"❌ <b>Order failed</b>\n"
+            f"User ID: <code>{user_id}</code>\n"
+            f"Service: <b>{escape(str(service['name']))}</b>\n"
+            f"Quantity: {quantity}\n"
+            f"Charged: ₹{charged_amount:.2f}\n"
+            f"Status: failed"
+        )
         bot.send_message(
             user_id,
             f"❌ Order failed. ₹ balance released.\nError: {raw_error}"
@@ -3224,6 +3266,15 @@ def process_order_quantity(message):
         }
         user_orders.setdefault(user_id, []).append(order_details)
         persist_order(user_id, order_details)
+        send_log(
+            f"🛒 <b>Order placed</b>\n"
+            f"User ID: <code>{user_id}</code>\n"
+            f"Order ID: <code>{order_id}</code>\n"
+            f"Service: <b>{escape(str(service['name']))}</b>\n"
+            f"Quantity: {quantity}\n"
+            f"Charged: ₹{charged_amount:.2f}\n"
+            f"Status: placed"
+        )
 
         bot.send_message(user_id,
             f"✅ 𝗢𝗥𝗗𝗘𝗥 𝗣𝗟𝗔𝗖𝗘𝗗 🦋\n"
@@ -3249,7 +3300,6 @@ def process_order_quantity(message):
             pass
 
         # Logs channel
-        send_log(admin_text)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -3310,6 +3360,7 @@ def handle_payment_screenshot(message):
     state = user_state.pop(user_id, {})
     if state.get("action") != "waiting_payment_screenshot":
         return
+    send_log(f"💳 <b>Payment submitted</b>\nUser ID: <code>{user_id}</code>")
     bot.forward_message(primary_admin_id(), user_id, message.message_id)
     bot.send_message(primary_admin_id(),
         f"💳 Payment screenshot from user <a href='tg://user?id={user_id}'>{user_id}</a>. Verify and add ₹ balance.",
@@ -3415,12 +3466,27 @@ def process_track_order(message):
             "order":  order_id
         }, timeout=15).json()
     except Exception as e:
+        send_log(f"⚠️ <b>Provider error</b>\nOrder ID: <code>{order_id}</code>\nError type: <code>{type(e).__name__}</code>")
         bot.send_message(user_id, f"❌ Error connecting to SMM panel: {e}")
         return
     if "error" in response:
+        send_log(f"⚠️ <b>Provider error</b>\nOrder ID: <code>{order_id}</code>\nError type: <code>order_status_error</code>")
         bot.send_message(user_id, f"❌ Error: {response['error']}")
     else:
         status = response.get("status", "Unknown")
+        order = orders_collection.find_one({"user_id": int(user_id), "order_id": order_id})
+        old_status = get_order_status_for_display(order) if order else "Unknown"
+        if str(old_status).lower() != str(status).lower():
+            send_log(
+                f"🔄 <b>Order status changed</b>\n"
+                f"Order ID: <code>{order_id}</code>\n"
+                f"{escape(str(old_status))} → {escape(str(status))}"
+            )
+        if order:
+            orders_collection.update_one(
+                {"_id": order["_id"]},
+                {"$set": {"status": str(status)}}
+            )
         info   = "\n".join([f"{k.capitalize()}: {v}" for k, v in response.items() if k != "status"])
         msg    = f"✅ <b>Order {order_id}</b>\nStatus: <b>{status}</b>"
         if info:
@@ -3624,6 +3690,7 @@ def cmd_add_balance(message):
         amount  = float(amount_s)
         user_balances[uid] = user_balances.get(uid, 0) + amount
         persist_user(uid)
+        send_log(f"✅ <b>Payment approved / wallet credited</b>\nUser ID: <code>{uid}</code>\nAmount: ₹{amount:.2f}")
         bot.send_message(message.chat.id, f"✅ Added ₹{amount:.2f} to {uid}")
         try:
             bot.send_message(uid, f"✅ Admin added ₹{amount:.2f} to your account!")
@@ -3654,6 +3721,7 @@ def cmd_remove_balance(message):
                         return
                     user_balances[uid] = float(updated["balance"])
                     persist_user(uid)
+                send_log(f"💰 <b>Wallet debited</b>\nUser ID: <code>{uid}</code>\nAmount: ₹{amount:.2f}")
         bot.send_message(message.chat.id, f"✅ Removed ₹{amount:.2f} from {uid}. New: ₹{user_balances[uid]:.2f}")
     except ValueError:
         bot.send_message(message.chat.id, "Usage: /removebalance <user_id> <amount>")
