@@ -49,11 +49,12 @@ DEFAULT_CONFIG = {
     "smm_api_key":        os.getenv("409c52e99fba11643c792a2cd581c023", ""),
 
     # Rates
-    "points_per_reaction": 10,
-    "points_per_view":     100,
-    "points_per_member":   1,
-    "points_per_referral": 25,
-    "daily_bonus_points":  10,
+    "provider_rate_reactions": 10,
+    "provider_rate_views":     100,
+    "provider_rate_members":   1,
+    "markup_percentage":   50.0,
+    "referral_reward_inr":  25.0,
+    "daily_bonus_inr":      10.0,
 
     # Service IDs
     "service_id_reactions": 476,
@@ -147,14 +148,15 @@ def ensure_default_services():
     if services_collection.count_documents({}) != 0:
         return
     rates = {
-        "reactions": cfg["points_per_reaction"],
-        "views": cfg["points_per_view"],
-        "members": cfg["points_per_member"],
+        "reactions": cfg["provider_rate_reactions"],
+        "views": cfg["provider_rate_views"],
+        "members": cfg["provider_rate_members"],
     }
     for service in DEFAULT_SERVICES:
         seeded = service.copy()
         seeded["provider_service_id"] = cfg[f"service_id_{service['_id']}"]
         seeded["price"] = rates[service["_id"]]
+        seeded["provider_rate"] = float(rates[service["_id"]])
         services_collection.insert_one(seeded)
 
 
@@ -187,7 +189,7 @@ user_balances        = {}   # {user_id: float}
 user_last_bonus      = {}   # {user_id: date}
 user_referrals       = {}   # {user_id: {"referrer": int, "rewarded": bool}}
 users                = set()
-gift_codes           = {}   # {code: points}
+gift_codes           = {}   # {code: INR amount}
 banned_users         = set()
 user_redeemed_codes  = {}   # {user_id: set of codes}
 user_orders          = {}   # {user_id: [order_dict]}
@@ -250,7 +252,7 @@ def wallet_atomic_debit(user_id, amount, session=None):
 
 
 def wallet_hold(user_id, amount, order_id=None, reservation_id=None):
-    """Atomically reserve available points and create its durable ledger entry."""
+    """Atomically reserve available INR and create its durable ledger entry."""
     user_id = int(user_id)
     amount = float(amount)
     if amount <= 0:
@@ -461,10 +463,10 @@ def persist_order(user_id, order):
     orders_collection.insert_one({"user_id": int(user_id), **order})
 
 
-def persist_gift_code(code, points):
+def persist_gift_code(code, amount):
     gift_codes_collection.replace_one(
         {"_id": code},
-        {"_id": code, "points": float(points)},
+        {"_id": code, "amount": float(amount), "points": float(amount)},
         upsert=True,
     )
 
@@ -495,7 +497,7 @@ def load_persistent_state():
         )
 
     for document in gift_codes_collection.find({}):
-        gift_codes[document["_id"]] = float(document.get("points", 0))
+        gift_codes[document["_id"]] = float(document.get("amount", document.get("points", 0)))
 
 
 load_persistent_state()
@@ -516,6 +518,27 @@ def is_admin(uid):
 
 def get_enabled_services():
     return list(services_collection.find({"enabled": True}).sort([("category", 1), ("name", 1)]))
+
+
+def get_provider_rate(service):
+    provider_rate = _safe_float(
+        service.get("provider_rate"),
+        _safe_float(service.get("price"), 0.0)
+    )
+    return provider_rate
+
+
+def get_selling_rate(service):
+    override = _safe_float(service.get("selling_rate"), 0.0)
+    if override > 0:
+        return override
+    provider_rate = get_provider_rate(service)
+    markup = _safe_float(cfg.get("markup_percentage"), 0.0)
+    return provider_rate + (provider_rate * markup / 100.0)
+
+
+def get_order_charge(service, quantity):
+    return float(quantity) / 1000.0 * get_selling_rate(service)
 
 
 def get_enabled_service_by_name(name):
@@ -972,7 +995,7 @@ def service_catalog_category_markup(platform, category, page=0, page_size=6):
     category_id = categories.index(category)
     for service in services[start:end]:
         markup.add(telebot.types.InlineKeyboardButton(
-            service["name"],
+            f"{service['name']} — ₹{get_selling_rate(service):.2f}/1K",
             callback_data=f"svc_catalog_service:{service['_id']}"
         ))
 
@@ -1193,7 +1216,8 @@ def service_catalog_service_callback(call):
         f"Category: <b>{escape(category)}</b>",
         f"Min: <b>{service.get('min', 'N/A')}</b>",
         f"Max: <b>{service.get('max', 'N/A')}</b>",
-        f"Price: <b>{service.get('price', 'N/A')}</b> units per point",
+        f"Provider rate: <b>₹{get_provider_rate(service):.2f}</b> / 1000\n"
+        f"Selling rate: <b>₹{get_selling_rate(service):.2f}</b> / 1000",
     ]
     description = str(service.get("description") or "").strip()
     if description:
@@ -1224,7 +1248,7 @@ def service_catalog_order_now_callback(call):
         "service_name": service["name"],
         "service_min": service["min"],
         "service_max": service["max"],
-        "points_per_unit": service["price"],
+        "selling_rate": get_selling_rate(service),
         "step": "awaiting_link",
         "link": "",
         "quantity": None,
@@ -1286,7 +1310,7 @@ def handle_catalog_order(message):
 
         state["quantity"] = quantity
         state["step"] = "summary"
-        current_price = quantity / state["points_per_unit"]
+        current_price = quantity / 1000.0 * state["selling_rate"]
         markup = telebot.types.InlineKeyboardMarkup(row_width=2)
         markup.add(
             telebot.types.InlineKeyboardButton("✅ Confirm", callback_data="svc_catalog_confirm_order"),
@@ -1302,7 +1326,7 @@ def handle_catalog_order(message):
             f"Service: <b>{escape(str(service['name']))}</b>\n"
             f"Link/Username: <code>{escape(str(state['link']))}</code>\n"
             f"Quantity: <b>{quantity}</b>\n"
-            f"Current price: <b>{current_price:.2f}</b> points\n\n"
+            f"Current price: <b>₹{current_price:.2f}</b>\n\n"
             "Please confirm this order.",
             reply_markup=markup,
             disable_web_page_preview=True,
@@ -1367,7 +1391,7 @@ def service_catalog_confirm_order_callback(call):
     state["service_name"] = service["name"]
     state["service_min"] = service["min"]
     state["service_max"] = service["max"]
-    state["points_per_unit"] = service["price"]
+    state["selling_rate"] = get_selling_rate(service)
     state["step"] = "awaiting_quantity"
     state["url"] = link
 
@@ -1412,12 +1436,12 @@ def process_order_quantity(message):
 
 
 def place_order_for_user(user_id, state, service, url, quantity):
-    points_per_unit = state.get("points_per_unit", service["price"])
-    required_pts   = quantity / points_per_unit
+    selling_rate = state.get("selling_rate", get_selling_rate(service))
+    charged_amount = quantity / 1000.0 * selling_rate
     try:
-        reservation = wallet_hold(user_id, required_pts)
+        reservation = wallet_hold(user_id, charged_amount)
     except Exception:
-        bot.send_message(user_id, "❌ Unable to reserve points right now. Please try again.")
+        bot.send_message(user_id, "❌ Unable to reserve ₹ balance right now. Please try again.")
         user_state.pop(user_id, None)
         return False
     if not reservation:
@@ -1426,8 +1450,8 @@ def place_order_for_user(user_id, state, service, url, quantity):
         user_balances[user_id] = available
         bot.send_message(
             user_id,
-            f"❌ Insufficient points. You need <b>{required_pts:.2f}</b> pts "
-            f"but have <b>{available:.2f}</b>."
+            f"❌ Insufficient ₹ balance. You need <b>₹{charged_amount:.2f}</b> "
+            f"but have <b>₹{available:.2f}</b>."
         )
         user_state.pop(user_id, None)
         return False
@@ -1461,8 +1485,8 @@ def place_order_for_user(user_id, state, service, url, quantity):
         wallet_mark_pending(reservation_id, "timeout_or_connection")
         bot.send_message(
             user_id,
-            f"⚠️ Provider response is pending. Your <b>{required_pts:.2f}</b> "
-            f"points remain reserved.\nReservation ID: <code>{reservation_id}</code>",
+            f"⚠️ Provider response is pending. Your <b>₹{charged_amount:.2f}</b> "
+            f"remains reserved.\nReservation ID: <code>{reservation_id}</code>",
             reply_markup=pending_reservation_markup(reservation_id)
         )
         return False
@@ -1473,8 +1497,8 @@ def place_order_for_user(user_id, state, service, url, quantity):
         wallet_mark_pending(reservation_id, "malformed_or_truncated_response")
         bot.send_message(
             user_id,
-            f"⚠️ Provider response could not be verified. Your <b>{required_pts:.2f}</b> "
-            f"points remain reserved.\nReservation ID: <code>{reservation_id}</code>",
+            f"⚠️ Provider response could not be verified. Your <b>₹{charged_amount:.2f}</b> "
+            f"remains reserved.\nReservation ID: <code>{reservation_id}</code>",
             reply_markup=pending_reservation_markup(reservation_id)
         )
         return False
@@ -1483,8 +1507,8 @@ def place_order_for_user(user_id, state, service, url, quantity):
         wallet_mark_pending(reservation_id, "malformed_or_truncated_response")
         bot.send_message(
             user_id,
-            f"⚠️ Provider response could not be verified. Your <b>{required_pts:.2f}</b> "
-            f"points remain reserved.\nReservation ID: <code>{reservation_id}</code>",
+            f"⚠️ Provider response could not be verified. Your <b>₹{charged_amount:.2f}</b> "
+            f"remains reserved.\nReservation ID: <code>{reservation_id}</code>",
             reply_markup=pending_reservation_markup(reservation_id)
         )
         return False
@@ -1503,8 +1527,8 @@ def place_order_for_user(user_id, state, service, url, quantity):
             wallet_mark_pending(reservation_id, "settlement_conflict")
             bot.send_message(
                 user_id,
-                f"⚠️ Order result could not be finalized. Your <b>{required_pts:.2f}</b> "
-                f"points remain reserved.\nReservation ID: <code>{reservation_id}</code>",
+                f"⚠️ Order result could not be finalized. Your <b>₹{charged_amount:.2f}</b> "
+                f"remains reserved.\nReservation ID: <code>{reservation_id}</code>",
                 reply_markup=pending_reservation_markup(reservation_id)
             )
             return False
@@ -1512,15 +1536,15 @@ def place_order_for_user(user_id, state, service, url, quantity):
         wallet_release(reservation_id, order_id=None)
         bot.send_message(
             user_id,
-            f"❌ Order failed. Points released.\nError: {raw_error}"
+            f"❌ Order failed. ₹ balance released.\nError: {raw_error}"
         )
         return False
     else:
         wallet_mark_pending(reservation_id, "ambiguous_provider_response")
         bot.send_message(
             user_id,
-            f"⚠️ Provider response was ambiguous. Your <b>{required_pts:.2f}</b> "
-            f"points remain reserved.\nReservation ID: <code>{reservation_id}</code>",
+            f"⚠️ Provider response was ambiguous. Your <b>₹{charged_amount:.2f}</b> "
+            f"remains reserved.\nReservation ID: <code>{reservation_id}</code>",
             reply_markup=pending_reservation_markup(reservation_id)
         )
         return False
@@ -1534,6 +1558,9 @@ def place_order_for_user(user_id, state, service, url, quantity):
             "reservation_id": reservation_id,
             "link":        url,
             "quantity":    quantity,
+            "charged_amount": charged_amount,
+            "provider_rate": get_provider_rate(service),
+            "selling_rate": selling_rate,
             "timestamp":   ts
         }
         user_orders.setdefault(user_id, []).append(order_details)
@@ -1620,11 +1647,12 @@ def rates_markup():
     )
     mk.add(
         telebot.types.InlineKeyboardButton("👥 Members Rate",     callback_data="rate_member"),
-        telebot.types.InlineKeyboardButton("🤝 Referral Points",  callback_data="rate_referral"),
+        telebot.types.InlineKeyboardButton("🤝 Referral ₹",       callback_data="rate_referral"),
     )
     mk.add(
-        telebot.types.InlineKeyboardButton("🎁 Daily Bonus Pts",  callback_data="rate_bonus"),
+        telebot.types.InlineKeyboardButton("🎁 Daily Bonus ₹",    callback_data="rate_bonus"),
     )
+    mk.add(telebot.types.InlineKeyboardButton("📈 Global Markup %", callback_data="rate_markup"))
     mk.add(telebot.types.InlineKeyboardButton("🔙 Back",          callback_data="ap_back"))
     return mk
 
@@ -1660,7 +1688,7 @@ def pending_reservations_admin_markup():
         amount = reservation.get("amount")
         short_id = reservation.get("reservation_id", "")[:8]
         mk.add(telebot.types.InlineKeyboardButton(
-            f"User {user_id} | {amount} pts | {short_id}",
+            f"User {user_id} | ₹{float(amount):.2f} | {short_id}",
             callback_data=f"ap_pending_view:{reservation.get('reservation_id')}"
         ))
     mk.add(telebot.types.InlineKeyboardButton("🔙 Back", callback_data="ap_back"))
@@ -1749,9 +1777,12 @@ def normalize_provider_service_payload(payload):
         maximum = _safe_int(item.get("max"), minimum) or minimum
         if maximum < minimum:
             maximum = minimum
-        price = _safe_float(item.get("price"), _safe_float(item.get("cost"), 1.0))
-        if price <= 0:
-            price = 1.0
+        provider_rate = _safe_float(
+            item.get("provider_rate"),
+            _safe_float(item.get("price"), _safe_float(item.get("cost"), 1.0))
+        )
+        if provider_rate <= 0:
+            provider_rate = 1.0
 
         normalized.append({
             "provider_service_id": provider_id,
@@ -1759,7 +1790,7 @@ def normalize_provider_service_payload(payload):
             "category": str(category),
             "min": minimum,
             "max": maximum,
-            "price": price,
+            "provider_rate": provider_rate,
         })
     return normalized
 
@@ -1798,7 +1829,7 @@ def sync_provider_services():
             "category": service["category"],
             "min": service["min"],
             "max": service["max"],
-            "price": service["price"],
+            "provider_rate": service["provider_rate"],
             "enabled": existing.get("enabled", True) if existing else True,
         }
         if existing:
@@ -1839,7 +1870,7 @@ def services_admin_text():
 
 
 def service_editor_prompt(service=None):
-    example = "Name | Provider ID | Category | Min | Max | Price | Enabled"
+    example = "Name | Provider ID | Category | Min | Max | Provider Rate | Selling Rate | Enabled"
     if service:
         values = " | ".join([
             str(service["name"]),
@@ -1847,7 +1878,8 @@ def service_editor_prompt(service=None):
             str(service["category"]),
             str(service["min"]),
             str(service["max"]),
-            str(service["price"]),
+            f"₹{get_provider_rate(service):.2f}",
+            f"₹{get_selling_rate(service):.2f}",
             "yes" if service.get("enabled") else "no",
         ])
         return (
@@ -1858,7 +1890,7 @@ def service_editor_prompt(service=None):
     return (
         "➕ <b>Add Service</b>\n\n"
         f"Send all fields in this format:\n<code>{escape(example)}</code>\n\n"
-        "Price keeps the existing meaning: units delivered for 1 point."
+        "Provider rate is the provider's cost per 1000. Selling rate is the customer price per 1000."
     )
 
 
@@ -1967,7 +1999,8 @@ def admin_callback(call):
             f"Provider ID: <code>{service['provider_service_id']}</code>\n"
             f"Category: <b>{escape(str(service['category']))}</b>\n"
             f"Min / Max: <b>{service['min']} / {service['max']}</b>\n"
-            f"Price: <b>{service['price']}</b> units per point\n"
+            f"Provider rate: <b>₹{get_provider_rate(service):.2f}</b> / 1000\n"
+            f"Selling rate: <b>₹{get_selling_rate(service):.2f}</b> / 1000\n"
             f"Status: <b>{'Enabled' if service.get('enabled') else 'Disabled'}</b>",
             uid, call.message.message_id, reply_markup=mk
         )
@@ -2030,13 +2063,14 @@ def admin_callback(call):
             f"🚫 Banned Users: <b>{banned_count}</b>\n"
             f"🎁 Active Gift Codes: <b>{gift_count}</b>\n"
             f"🛒 Total Orders: <b>{total_orders}</b>\n"
-            f"💰 Total Points Held: <b>{total_balance:.0f}</b>\n\n"
+            f"💰 Total INR Held: <b>₹{total_balance:.2f}</b>\n\n"
             f"⚙️ <b>Current Settings</b>\n"
-            f"👍 Reactions Rate: {cfg['points_per_reaction']} units/pt\n"
-            f"👀 Views Rate: {cfg['points_per_view']} units/pt\n"
-            f"👥 Members Rate: {cfg['points_per_member']} units/pt\n"
-            f"🤝 Referral Points: {cfg['points_per_referral']}\n"
-            f"🎁 Daily Bonus: {cfg['daily_bonus_points']}\n"
+            f"👍 Reactions provider rate: ₹{cfg['provider_rate_reactions']:.2f} / 1000\n"
+            f"👀 Views provider rate: ₹{cfg['provider_rate_views']:.2f} / 1000\n"
+            f"👥 Members provider rate: ₹{cfg['provider_rate_members']:.2f} / 1000\n"
+            f"🤝 Referral reward: ₹{cfg['referral_reward_inr']:.2f}\n"
+            f"🎁 Daily bonus: ₹{cfg['daily_bonus_inr']:.2f}\n"
+            f"📈 Global markup: {cfg['markup_percentage']:.2f}%\n"
             f"📡 Logs Channel: {cfg.get('logs_channel') or 'Not Set'}"
         )
         mk = telebot.types.InlineKeyboardMarkup()
@@ -2074,7 +2108,7 @@ def admin_callback(call):
             bot.answer_callback_query(call.id, "No active gift codes.")
             return
         user_state[uid] = {"action": "admin_gc_delete"}
-        codes_list = "\n".join([f"<code>{c}</code> → {p} pts" for c, p in gift_codes.items()])
+        codes_list = "\n".join([f"<code>{c}</code> → ₹{p:.2f}" for c, p in gift_codes.items()])
         mk = telebot.types.InlineKeyboardMarkup()
         mk.add(telebot.types.InlineKeyboardButton("❌ Cancel", callback_data="ap_back"))
         bot.edit_message_text(
@@ -2090,7 +2124,7 @@ def admin_callback(call):
         mk = telebot.types.InlineKeyboardMarkup()
         mk.add(telebot.types.InlineKeyboardButton("❌ Cancel", callback_data="ap_back"))
         bot.edit_message_text(
-            "➕ <b>Add Balance</b>\n\nSend in format:\n<code>USER_ID POINTS</code>\n\nExample: <code>123456789 500</code>",
+            "➕ <b>Add INR Balance</b>\n\nSend in format:\n<code>USER_ID AMOUNT</code>\n\nExample: <code>123456789 500</code>",
             uid, call.message.message_id, reply_markup=mk
         )
         bot.register_next_step_handler(call.message, process_admin_add_bal)
@@ -2102,7 +2136,7 @@ def admin_callback(call):
         mk = telebot.types.InlineKeyboardMarkup()
         mk.add(telebot.types.InlineKeyboardButton("❌ Cancel", callback_data="ap_back"))
         bot.edit_message_text(
-            "➖ <b>Remove Balance</b>\n\nSend in format:\n<code>USER_ID POINTS</code>\n\nExample: <code>123456789 100</code>",
+            "➖ <b>Remove INR Balance</b>\n\nSend in format:\n<code>USER_ID AMOUNT</code>\n\nExample: <code>123456789 100</code>",
             uid, call.message.message_id, reply_markup=mk
         )
         bot.register_next_step_handler(call.message, process_admin_rem_bal)
@@ -2171,7 +2205,7 @@ def admin_callback(call):
             created = reservation.get("created_at") or "unknown"
             lines.append(
                 f"• User <code>{reservation.get('user_id')}</code> | "
-                f"{reservation.get('amount')} pts | "
+                f"₹{float(reservation.get('amount', 0)):.2f} | "
                 f"Res <code>{reservation.get('reservation_id')}</code> | "
                 f"Req <code>{reservation.get('provider_request_id', 'n/a')}</code> | "
                 f"Reason: {reservation.get('pending_reason', 'n/a')} | "
@@ -2190,7 +2224,7 @@ def admin_callback(call):
         details = (
             "📋 <b>Reservation Details</b>\n\n"
             f"User ID: <code>{reservation.get('user_id')}</code>\n"
-            f"Amount: <b>{reservation.get('amount')}</b> pts\n"
+            f"Amount: <b>₹{float(reservation.get('amount', 0)):.2f}</b>\n"
             f"Reservation ID: <code>{reservation.get('reservation_id')}</code>\n"
             f"Provider Request ID: <code>{reservation.get('provider_request_id', 'n/a')}</code>\n"
             f"Order ID: <code>{reservation.get('order_id', 'n/a')}</code>\n"
@@ -2256,11 +2290,12 @@ def admin_callback(call):
     if data == "ap_rates":
         text = (
             f"⚙️ <b>Edit Rates</b>\n\n"
-            f"👍 Reactions: 1pt = {cfg['points_per_reaction']} reactions\n"
-            f"👀 Views: 1pt = {cfg['points_per_view']} views\n"
-            f"👥 Members: 1pt = {cfg['points_per_member']} members\n"
-            f"🤝 Referral reward: {cfg['points_per_referral']} pts\n"
-            f"🎁 Daily bonus: {cfg['daily_bonus_points']} pts\n\n"
+            f"👍 Reactions provider rate: ₹{cfg['provider_rate_reactions']:.2f} / 1000\n"
+            f"👀 Views provider rate: ₹{cfg['provider_rate_views']:.2f} / 1000\n"
+            f"👥 Members provider rate: ₹{cfg['provider_rate_members']:.2f} / 1000\n"
+            f"🤝 Referral reward: ₹{cfg['referral_reward_inr']:.2f}\n"
+            f"🎁 Daily bonus: ₹{cfg['daily_bonus_inr']:.2f}\n"
+            f"📈 Global markup: {cfg['markup_percentage']:.2f}%\n\n"
             f"Select which rate to edit:"
         )
         bot.edit_message_text(text, uid, call.message.message_id, reply_markup=rates_markup())
@@ -2268,11 +2303,12 @@ def admin_callback(call):
 
     # ── Individual rate edits ──
     rate_map = {
-        "rate_reaction":  ("points_per_reaction",  "👍 Reactions (units per 1 point)"),
-        "rate_view":      ("points_per_view",       "👀 Views (units per 1 point)"),
-        "rate_member":    ("points_per_member",     "👥 Members (units per 1 point)"),
-        "rate_referral":  ("points_per_referral",   "🤝 Referral reward (points)"),
-        "rate_bonus":     ("daily_bonus_points",    "🎁 Daily bonus (points)"),
+        "rate_reaction":  ("provider_rate_reactions", "👍 Reactions provider rate (₹ / 1000)"),
+        "rate_view":      ("provider_rate_views",     "👀 Views provider rate (₹ / 1000)"),
+        "rate_member":    ("provider_rate_members",   "👥 Members provider rate (₹ / 1000)"),
+        "rate_referral":  ("referral_reward_inr",     "🤝 Referral reward (₹)"),
+        "rate_bonus":     ("daily_bonus_inr",         "🎁 Daily bonus (₹)"),
+        "rate_markup":    ("markup_percentage",       "📈 Global markup (%)"),
     }
     if data in rate_map:
         cfg_key, label = rate_map[data]
@@ -2403,21 +2439,21 @@ def process_gc_create_step(message):
             bot.register_next_step_handler(message, process_gc_create_step)
             return
         user_state[uid]["gift_code"] = code
-        user_state[uid]["step"] = "points"
-        bot.send_message(uid, f"Step 2/2 – Code: <code>{code}</code>\n\nNow enter the points value (number):")
+        user_state[uid]["step"] = "amount"
+        bot.send_message(uid, f"Step 2/2 – Code: <code>{code}</code>\n\nNow enter the INR amount:")
         bot.register_next_step_handler(message, process_gc_create_step)
-    elif state["step"] == "points":
+    elif state["step"] == "amount":
         try:
-            points = float(message.text.strip())
+            amount = float(message.text.strip())
         except ValueError:
             bot.send_message(uid, "❌ Enter a valid number:")
             bot.register_next_step_handler(message, process_gc_create_step)
             return
         code = user_state.pop(uid)["gift_code"]
-        gift_codes[code] = points
-        persist_gift_code(code, points)
+        gift_codes[code] = amount
+        persist_gift_code(code, amount)
         bot.send_message(uid,
-            f"✅ Gift code <code>{code}</code> created with <b>{points:.0f} points</b>!",
+            f"✅ Gift code <code>{code}</code> created with <b>₹{amount:.2f}</b>!",
             reply_markup=admin_panel_markup()
         )
 
@@ -2448,17 +2484,17 @@ def process_admin_add_bal(message):
     try:
         parts = message.text.strip().split()
         target_id = int(parts[0])
-        points = float(parts[1])
+        amount = float(parts[1])
         with wallet_balance_lock:
-            user_balances[target_id] = user_balances.get(target_id, 0) + points
+            user_balances[target_id] = user_balances.get(target_id, 0) + amount
             persist_user(target_id)
-        bot.send_message(uid, f"✅ Added <b>{points:.0f} pts</b> to user <code>{target_id}</code>.\nNew balance: {user_balances[target_id]:.0f}", reply_markup=admin_panel_markup())
+        bot.send_message(uid, f"✅ Added <b>₹{amount:.2f}</b> to user <code>{target_id}</code>.\nNew balance: ₹{user_balances[target_id]:.2f}", reply_markup=admin_panel_markup())
         try:
-            bot.send_message(target_id, f"🎉 Admin credited <b>{points:.0f} points</b> to your account!")
+            bot.send_message(target_id, f"🎉 Admin added <b>₹{amount:.2f}</b> to your account!")
         except Exception:
             pass
     except (ValueError, IndexError):
-        bot.send_message(uid, "❌ Invalid format. Use: <code>USER_ID POINTS</code>", reply_markup=admin_panel_markup())
+        bot.send_message(uid, "❌ Invalid format. Use: <code>USER_ID AMOUNT</code>", reply_markup=admin_panel_markup())
 
 
 @safe_handler
@@ -2470,26 +2506,26 @@ def process_admin_rem_bal(message):
     try:
         parts = message.text.strip().split()
         target_id = int(parts[0])
-        points = float(parts[1])
-        if points < 0:
+        amount = float(parts[1])
+        if amount < 0:
             bot.send_message(uid, "❌ Removal amount must be positive.", reply_markup=admin_panel_markup())
             return
         with wallet_balance_lock:
             with mongo_client.start_session() as session:
                 with session.start_transaction():
-                    updated = wallet_atomic_debit(target_id, points, session=session)
+                    updated = wallet_atomic_debit(target_id, amount, session=session)
                     if not updated:
-                        bot.send_message(uid, f"❌ Cannot remove <b>{points:.0f}</b> points from user <code>{target_id}</code> because the balance would go below zero.", reply_markup=admin_panel_markup())
+                        bot.send_message(uid, f"❌ Cannot remove <b>₹{amount:.2f}</b> from user <code>{target_id}</code> because the balance would go below zero.", reply_markup=admin_panel_markup())
                         return
                     user_balances[target_id] = float(updated["balance"])
                     persist_user(target_id)
-        bot.send_message(uid, f"✅ Removed <b>{points:.0f} pts</b> from user <code>{target_id}</code>.\nNew balance: {user_balances[target_id]:.0f}", reply_markup=admin_panel_markup())
+        bot.send_message(uid, f"✅ Removed <b>₹{amount:.2f}</b> from user <code>{target_id}</code>.\nNew balance: ₹{user_balances[target_id]:.2f}", reply_markup=admin_panel_markup())
         try:
-            bot.send_message(target_id, f"⚠️ Admin deducted <b>{points:.0f} points</b> from your account.")
+            bot.send_message(target_id, f"⚠️ Admin deducted <b>₹{amount:.2f}</b> from your account.")
         except Exception:
             pass
     except (ValueError, IndexError):
-        bot.send_message(uid, "❌ Invalid format. Use: <code>USER_ID POINTS</code>", reply_markup=admin_panel_markup())
+        bot.send_message(uid, "❌ Invalid format. Use: <code>USER_ID AMOUNT</code>", reply_markup=admin_panel_markup())
 
 
 @safe_handler
@@ -2501,7 +2537,7 @@ def process_admin_check_bal(message):
     try:
         target_id = int(message.text.strip())
         bal = user_balances.get(target_id, 0)
-        bot.send_message(uid, f"💰 User <code>{target_id}</code> balance: <b>{bal:.2f} points</b>", reply_markup=admin_panel_markup())
+        bot.send_message(uid, f"💰 User <code>{target_id}</code> balance: <b>₹{bal:.2f}</b>", reply_markup=admin_panel_markup())
     except ValueError:
         bot.send_message(uid, "❌ Invalid user ID.", reply_markup=admin_panel_markup())
 
@@ -2552,19 +2588,19 @@ def process_admin_edit_rate(message):
         return
     try:
         val = float(message.text.strip())
-        if val <= 0:
+        if val < 0:
             raise ValueError
         cfg[state["cfg_key"]] = val
         save_config(cfg)
         legacy_service_id = {
-            "points_per_reaction": "reactions",
-            "points_per_view": "views",
-            "points_per_member": "members",
+            "provider_rate_reactions": "reactions",
+            "provider_rate_views": "views",
+            "provider_rate_members": "members",
         }.get(state["cfg_key"])
         if legacy_service_id:
             services_collection.update_one(
                 {"_id": legacy_service_id},
-                {"$set": {"price": val}}
+                {"$set": {"provider_rate": val}}
             )
         bot.send_message(uid,
             f"✅ <b>{state['label']}</b> updated to <b>{val}</b>",
@@ -2616,11 +2652,11 @@ def process_admin_service_input(message):
         return
 
     parts = [part.strip() for part in message.text.split("|")]
-    if len(parts) != 7 or any(not part for part in parts[:3]):
+    if len(parts) != 8 or any(not part for part in parts[:3]):
         bot.send_message(
             uid,
             "❌ Invalid format. Use:\n"
-            "<code>Name | Provider ID | Category | Min | Max | Price | Enabled</code>",
+            "<code>Name | Provider ID | Category | Min | Max | Provider Rate | Selling Rate | Enabled</code>",
             reply_markup=admin_panel_markup()
         )
         return
@@ -2631,18 +2667,19 @@ def process_admin_service_input(message):
         provider_service_id = int(parts[1])
         minimum = int(parts[3])
         maximum = int(parts[4])
-        price = float(parts[5])
-        enabled_key = parts[6].lower()
+        provider_rate = float(parts[5])
+        selling_rate = float(parts[6])
+        enabled_key = parts[7].lower()
         if (
             provider_service_id <= 0 or minimum < 1 or maximum < minimum or
-            price <= 0 or enabled_key not in enabled_values
+            provider_rate <= 0 or selling_rate <= 0 or enabled_key not in enabled_values
         ):
             raise ValueError
     except ValueError:
         bot.send_message(
             uid,
             "❌ Invalid numeric range or enabled value. "
-            "Use positive Provider ID/Min/Price, Max ≥ Min, and yes/no for Enabled.",
+            "Use positive Provider ID/Min/rates, Max ≥ Min, and yes/no for Enabled.",
             reply_markup=admin_panel_markup()
         )
         return
@@ -2653,7 +2690,8 @@ def process_admin_service_input(message):
         "category": parts[2],
         "min": minimum,
         "max": maximum,
-        "price": price,
+        "provider_rate": provider_rate,
+        "selling_rate": selling_rate,
         "enabled": enabled_values[enabled_key],
     }
     if state["action"] == "admin_service_edit":
@@ -2835,13 +2873,13 @@ def joined_button_handler(call):
         ref_info = user_referrals[user_id]
         if not ref_info.get("rewarded"):
             referrer_id = ref_info["referrer"]
-            reward = cfg["points_per_referral"]
+            reward = float(cfg["referral_reward_inr"])
             user_balances[referrer_id] = user_balances.get(referrer_id, 0) + reward
             user_referrals[user_id]["rewarded"] = True
             persist_user(referrer_id)
             persist_user(user_id)
             try:
-                bot.send_message(referrer_id, f"✅ You received <b>{reward} points</b> for a referral!")
+                bot.send_message(referrer_id, f"✅ You received <b>₹{reward:.2f}</b> referral reward!")
             except Exception:
                 pass
 
@@ -2877,13 +2915,13 @@ def start_order(message, service):
         "service_name": service["name"],
         "service_min": service["min"],
         "service_max": service["max"],
-        "points_per_unit": service["price"],
+        "selling_rate": get_selling_rate(service),
         "step": "awaiting_link",
         "url": None
     }
     bot.send_message(user_id,
         f"𝗦𝗘𝗡𝗗 𝗬𝗢𝗨𝗥 𝗧𝗘𝗟𝗘𝗚𝗥𝗔𝗠 𝗟𝗜𝗡𝗞 𝗙𝗢𝗥 {service['name']}:\n"
-        f"(1 point = {service['price']} {service['category']})"
+        f"(Selling rate: ₹{get_selling_rate(service):.2f} per 1000 {service['category']})"
     )
 
 
@@ -2966,10 +3004,10 @@ def retry_reservation_handler(call):
         )
         return
     if result["status"] == "released":
-        bot.answer_callback_query(call.id, "✅ Points were released.")
+        bot.answer_callback_query(call.id, "✅ ₹ balance was released.")
         bot.send_message(
             call.message.chat.id,
-            "✅ Your points were already released for this reservation."
+            "✅ Your ₹ balance was already released for this reservation."
         )
         return
     bot.answer_callback_query(call.id, "⏳ Still pending.")
@@ -2979,7 +3017,7 @@ def retry_reservation_handler(call):
             f"⏳ This reservation is still pending review.\n"
             f"Request ID: <code>{result['provider_request_id']}</code>\n"
             f"Reason: {result.get('reason', 'unknown')}\n\n"
-            f"Your points remain reserved. Please wait for admin review."
+            f"Your ₹{result.get('amount', 0):.2f} remains reserved. Please wait for admin review."
         )
     else:
         bot.send_message(
@@ -3019,10 +3057,10 @@ def process_order_link(message):
         return
     state["url"]  = message.text.strip()
     state["step"] = "awaiting_quantity"
-    units         = state["points_per_unit"]
+    selling_rate  = state["selling_rate"]
     bot.send_message(user_id,
         f"𝗘𝗡𝗧𝗘𝗥 𝗤𝗨𝗔𝗡𝗧𝗜𝗧𝗬 (𝗠𝗜𝗡 {state['service_min']}):\n"
-        f"(1 point = {units} {state['service_name']})"
+        f"(Selling rate: ₹{selling_rate:.2f} per 1000 {state['service_name']})"
     )
 
 
@@ -3050,13 +3088,13 @@ def process_order_quantity(message):
         bot.send_message(user_id, "❌ This service is no longer enabled.")
         return
 
-    points_per_unit = state["points_per_unit"]
     url            = state["url"]
-    required_pts   = quantity / points_per_unit
+    selling_rate   = state.get("selling_rate", get_selling_rate(service))
+    charged_amount = quantity / 1000.0 * selling_rate
     try:
-        reservation = wallet_hold(user_id, required_pts)
+        reservation = wallet_hold(user_id, charged_amount)
     except Exception:
-        bot.send_message(user_id, "❌ Unable to reserve points right now. Please try again.")
+        bot.send_message(user_id, "❌ Unable to reserve ₹ balance right now. Please try again.")
         user_state.pop(user_id, None)
         return
     if not reservation:
@@ -3065,8 +3103,8 @@ def process_order_quantity(message):
         user_balances[user_id] = available
         bot.send_message(
             user_id,
-            f"❌ Insufficient points. You need <b>{required_pts:.2f}</b> pts "
-            f"but have <b>{available:.2f}</b>."
+            f"❌ Insufficient ₹ balance. You need <b>₹{charged_amount:.2f}</b> "
+            f"but have <b>₹{available:.2f}</b>."
         )
         user_state.pop(user_id, None)
         return
@@ -3100,8 +3138,8 @@ def process_order_quantity(message):
         wallet_mark_pending(reservation_id, "timeout_or_connection")
         bot.send_message(
             user_id,
-            f"⚠️ Provider response is pending. Your <b>{required_pts:.2f}</b> "
-            f"points remain reserved.\nReservation ID: <code>{reservation_id}</code>",
+            f"⚠️ Provider response is pending. Your <b>₹{charged_amount:.2f}</b> "
+            f"remains reserved.\nReservation ID: <code>{reservation_id}</code>",
             reply_markup=pending_reservation_markup(reservation_id)
         )
         return
@@ -3112,8 +3150,8 @@ def process_order_quantity(message):
         wallet_mark_pending(reservation_id, "malformed_or_truncated_response")
         bot.send_message(
             user_id,
-            f"⚠️ Provider response could not be verified. Your <b>{required_pts:.2f}</b> "
-            f"points remain reserved.\nReservation ID: <code>{reservation_id}</code>",
+            f"⚠️ Provider response could not be verified. Your <b>₹{charged_amount:.2f}</b> "
+            f"remains reserved.\nReservation ID: <code>{reservation_id}</code>",
             reply_markup=pending_reservation_markup(reservation_id)
         )
         return
@@ -3122,8 +3160,8 @@ def process_order_quantity(message):
         wallet_mark_pending(reservation_id, "malformed_or_truncated_response")
         bot.send_message(
             user_id,
-            f"⚠️ Provider response could not be verified. Your <b>{required_pts:.2f}</b> "
-            f"points remain reserved.\nReservation ID: <code>{reservation_id}</code>",
+            f"⚠️ Provider response could not be verified. Your <b>₹{charged_amount:.2f}</b> "
+            f"remains reserved.\nReservation ID: <code>{reservation_id}</code>",
             reply_markup=pending_reservation_markup(reservation_id)
         )
         return
@@ -3142,8 +3180,8 @@ def process_order_quantity(message):
             wallet_mark_pending(reservation_id, "settlement_conflict")
             bot.send_message(
                 user_id,
-                f"⚠️ Order result could not be finalized. Your <b>{required_pts:.2f}</b> "
-                f"points remain reserved.\nReservation ID: <code>{reservation_id}</code>",
+                f"⚠️ Order result could not be finalized. Your <b>₹{charged_amount:.2f}</b> "
+                f"remains reserved.\nReservation ID: <code>{reservation_id}</code>",
                 reply_markup=pending_reservation_markup(reservation_id)
             )
             return
@@ -3151,15 +3189,15 @@ def process_order_quantity(message):
         wallet_release(reservation_id, order_id=None)
         bot.send_message(
             user_id,
-            f"❌ Order failed. Points released.\nError: {raw_error}"
+            f"❌ Order failed. ₹ balance released.\nError: {raw_error}"
         )
         return
     else:
         wallet_mark_pending(reservation_id, "ambiguous_provider_response")
         bot.send_message(
             user_id,
-            f"⚠️ Provider response was ambiguous. Your <b>{required_pts:.2f}</b> "
-            f"points remain reserved.\nReservation ID: <code>{reservation_id}</code>",
+            f"⚠️ Provider response was ambiguous. Your <b>₹{charged_amount:.2f}</b> "
+            f"remains reserved.\nReservation ID: <code>{reservation_id}</code>",
             reply_markup=pending_reservation_markup(reservation_id)
         )
         return
@@ -3173,6 +3211,9 @@ def process_order_quantity(message):
             "reservation_id": reservation_id,
             "link":        url,
             "quantity":    quantity,
+            "charged_amount": charged_amount,
+            "provider_rate": get_provider_rate(service),
+            "selling_rate": selling_rate,
             "timestamp":   ts
         }
         user_orders.setdefault(user_id, []).append(order_details)
@@ -3218,11 +3259,7 @@ def check_balance(message):
     bal = user_balances.get(uid, 0)
     bot.send_message(uid,
         f"💰 <b>Your Balance</b>\n\n"
-        f"Points: <b>{bal:.2f}</b>\n\n"
-        f"📊 Conversion rates:\n"
-        f"👍 1 pt = {cfg['points_per_reaction']} Reactions\n"
-        f"👀 1 pt = {cfg['points_per_view']} Views\n"
-        f"👥 1 pt = {cfg['points_per_member']} Members"
+        f"💰 Wallet Balance: <b>₹{bal:.2f}</b>"
     )
 
 
@@ -3237,11 +3274,11 @@ def claim_bonus(message):
     if user_id in user_last_bonus and user_last_bonus[user_id] == today:
         bot.send_message(user_id, "❌ 𝘽𝙖𝙨 𝙠𝙧 𝙗𝙝𝙖𝙞 𝙚𝙠 𝙝𝙞 𝙙𝙞𝙣 𝙢𝙚 𝙠𝙞𝙩𝙣𝙖 𝙡𝙚𝙂𝙖🌚 YOU CAN CLAIM BONUS ONCE A DAY.")
         return
-    bonus = cfg["daily_bonus_points"]
+    bonus = float(cfg["daily_bonus_inr"])
     user_balances[user_id] = user_balances.get(user_id, 0) + bonus
     user_last_bonus[user_id] = today
     persist_user(user_id)
-    bot.send_message(user_id, f"✅ <b>{bonus} BONUS POINTS</b> credited to your account! ☺")
+    bot.send_message(user_id, f"✅ <b>₹{bonus:.2f}</b> bonus added to your account! ☺")
 
 
 @bot.message_handler(func=lambda m: m.text == "➕ Add Funds")
@@ -3269,7 +3306,7 @@ def handle_payment_screenshot(message):
         return
     bot.forward_message(primary_admin_id(), user_id, message.message_id)
     bot.send_message(primary_admin_id(),
-        f"💳 Payment screenshot from user <a href='tg://user?id={user_id}'>{user_id}</a>. Verify and add points.",
+        f"💳 Payment screenshot from user <a href='tg://user?id={user_id}'>{user_id}</a>. Verify and add ₹ balance.",
         disable_web_page_preview=True
     )
     bot.send_message(user_id, "✅ 𝗣𝗔𝗬𝗠𝗘𝗡𝗧 𝗦𝗖𝗥𝗘𝗘𝗡𝗦𝗛𝗢𝗧 𝗦𝗘𝗡𝗧 𝗧𝗢 𝗔𝗗𝗠𝗜𝗡. Please wait for verification.")
@@ -3288,7 +3325,7 @@ def refer_earn(message):
     rewarded  = [r for r, info in user_referrals.items() if info["referrer"] == user_id and info["rewarded"]]
     bot.send_message(user_id,
         f"📢 <b>Refer & Earn</b>\n\n"
-        f"Earn <b>{cfg['points_per_referral']} points</b> per referral!\n\n"
+        f"Earn <b>₹{float(cfg['referral_reward_inr']):.2f}</b> per referral!\n\n"
         f"🔗 Your link:\n<code>{link}</code>\n\n"
         f"👥 Total referred: {len(referred)}\n"
         f"✅ Rewarded: {len(rewarded)}\n\n"
@@ -3337,10 +3374,10 @@ def process_giftcode(message):
         bot.send_message(user_id, "❌ You have already redeemed this gift code!")
         return
     redeemed.add(code)
-    points = gift_codes[code]
-    user_balances[user_id] = user_balances.get(user_id, 0) + points
+    amount = gift_codes[code]
+    user_balances[user_id] = user_balances.get(user_id, 0) + amount
     persist_user(user_id)
-    bot.send_message(user_id, f"✅ Gift code <code>{code}</code> redeemed! You received <b>{points:.0f} points</b> 🎉")
+    bot.send_message(user_id, f"✅ Gift code <code>{code}</code> redeemed! You received <b>₹{amount:.2f}</b> 🎉")
 
 
 @bot.message_handler(func=lambda m: m.text == "🖲 Track Order")
@@ -3405,6 +3442,16 @@ def get_order_status_for_display(order):
 
 
 def get_order_amount_for_display(order):
+    charged_amount = _safe_float(order.get("charged_amount"), 0.0)
+    if charged_amount > 0:
+        return f"₹{charged_amount:.2f}"
+
+    reservation_id = order.get("reservation_id")
+    if reservation_id:
+        reservation = wallet_reservations_collection.find_one({"_id": reservation_id})
+        if reservation and reservation.get("amount") is not None:
+            return f"₹{float(reservation['amount']):.2f}"
+
     quantity = order.get("quantity")
     if quantity is None:
         return "N/A"
@@ -3413,11 +3460,11 @@ def get_order_amount_for_display(order):
     service = services_collection.find_one({"name": service_name}) if service_name else None
     if not service:
         return "N/A"
-    price = service.get("price")
-    if price is None or float(price) <= 0:
+    selling_rate = get_selling_rate(service)
+    if selling_rate <= 0:
         return "N/A"
-    amount = float(quantity) / float(price)
-    return f"{amount:.2f} pts"
+    amount = float(quantity) / 1000.0 * selling_rate
+    return f"₹{amount:.2f}"
 
 
 def render_my_orders_page(user_id, page=0, page_size=5):
@@ -3566,18 +3613,18 @@ def cmd_add_balance(message):
     if not is_admin(message.chat.id):
         return
     try:
-        _, uid_s, pts_s = message.text.split()
+        _, uid_s, amount_s = message.text.split()
         uid  = int(uid_s)
-        pts  = float(pts_s)
-        user_balances[uid] = user_balances.get(uid, 0) + pts
+        amount  = float(amount_s)
+        user_balances[uid] = user_balances.get(uid, 0) + amount
         persist_user(uid)
-        bot.send_message(message.chat.id, f"✅ Added {pts} pts to {uid}")
+        bot.send_message(message.chat.id, f"✅ Added ₹{amount:.2f} to {uid}")
         try:
-            bot.send_message(uid, f"✅ Admin credited {pts:.0f} points to your account!")
+            bot.send_message(uid, f"✅ Admin added ₹{amount:.2f} to your account!")
         except Exception:
             pass
     except ValueError:
-        bot.send_message(message.chat.id, "Usage: /addbalance <user_id> <points>")
+        bot.send_message(message.chat.id, "Usage: /addbalance <user_id> <amount>")
 
 
 @bot.message_handler(commands=['removebalance'])
@@ -3586,24 +3633,24 @@ def cmd_remove_balance(message):
     if not is_admin(message.chat.id):
         return
     try:
-        _, uid_s, pts_s = message.text.split()
+        _, uid_s, amount_s = message.text.split()
         uid  = int(uid_s)
-        pts  = float(pts_s)
-        if pts < 0:
-            bot.send_message(message.chat.id, "Usage: /removebalance <user_id> <points> (points must be positive)")
+        amount  = float(amount_s)
+        if amount < 0:
+            bot.send_message(message.chat.id, "Usage: /removebalance <user_id> <amount> (amount must be positive)")
             return
         with wallet_balance_lock:
             with mongo_client.start_session() as session:
                 with session.start_transaction():
-                    updated = wallet_atomic_debit(uid, pts, session=session)
+                    updated = wallet_atomic_debit(uid, amount, session=session)
                     if not updated:
-                        bot.send_message(message.chat.id, f"❌ Cannot remove {pts} pts from {uid}; balance would go below zero.")
+                        bot.send_message(message.chat.id, f"❌ Cannot remove ₹{amount:.2f} from {uid}; balance would go below zero.")
                         return
                     user_balances[uid] = float(updated["balance"])
                     persist_user(uid)
-        bot.send_message(message.chat.id, f"✅ Removed {pts} pts from {uid}. New: {user_balances[uid]:.2f}")
+        bot.send_message(message.chat.id, f"✅ Removed ₹{amount:.2f} from {uid}. New: ₹{user_balances[uid]:.2f}")
     except ValueError:
-        bot.send_message(message.chat.id, "Usage: /removebalance <user_id> <points>")
+        bot.send_message(message.chat.id, "Usage: /removebalance <user_id> <amount>")
 
 
 @bot.message_handler(commands=['checkbalance'])
@@ -3614,7 +3661,7 @@ def cmd_check_balance(message):
     try:
         parts = message.text.split()
         uid   = int(parts[1])
-        bot.send_message(message.chat.id, f"Balance of {uid}: {user_balances.get(uid, 0):.2f} pts")
+        bot.send_message(message.chat.id, f"Balance of {uid}: ₹{user_balances.get(uid, 0):.2f}")
     except (ValueError, IndexError):
         bot.send_message(message.chat.id, "Usage: /checkbalance <user_id>")
 
@@ -3625,13 +3672,13 @@ def cmd_giftcode(message):
     if not is_admin(message.chat.id):
         return
     try:
-        _, code, pts_s = message.text.split()
-        pts = float(pts_s)
-        gift_codes[code] = pts
-        persist_gift_code(code, pts)
-        bot.send_message(message.chat.id, f"✅ Gift code '{code}' = {pts:.0f} pts")
+        _, code, amount_s = message.text.split()
+        amount = float(amount_s)
+        gift_codes[code] = amount
+        persist_gift_code(code, amount)
+        bot.send_message(message.chat.id, f"✅ Gift code '{code}' = ₹{amount:.2f}")
     except ValueError:
-        bot.send_message(message.chat.id, "Usage: /giftcode <code> <points>")
+        bot.send_message(message.chat.id, "Usage: /giftcode <code> <amount>")
 
 
 @bot.message_handler(commands=['stats'])
