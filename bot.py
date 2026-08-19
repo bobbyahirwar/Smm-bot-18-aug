@@ -70,6 +70,7 @@ DEFAULT_CONFIG = {
     ],
 
     "qr_code_url": "https://t.me/bobbyQr/2",
+    "main_menu_photo_file_id": "",
     "payment_contact": "@BOBBY_2606",
     "bot_username": "Bobby SMM Bot"
 }
@@ -670,18 +671,44 @@ def join_menu():
 def main_menu():
     markup = telebot.types.InlineKeyboardMarkup(row_width=2)
     markup.add(
-        telebot.types.InlineKeyboardButton("🛍 Order Services", callback_data="svc_catalog_home"),
-        telebot.types.InlineKeyboardButton("📦 My Orders", callback_data="main_menu_my_orders"),
+        telebot.types.InlineKeyboardButton("🛒 ORDER SERVICES", callback_data="svc_catalog_home"),
+        telebot.types.InlineKeyboardButton("📦 MY ORDERS", callback_data="main_menu_my_orders"),
     )
     markup.add(
-        telebot.types.InlineKeyboardButton("💰 Check Balance", callback_data="main_menu_check_balance"),
-        telebot.types.InlineKeyboardButton("➕ Add Funds", callback_data="main_menu_add_funds"),
+        telebot.types.InlineKeyboardButton("💳 ADD FUNDS", callback_data="main_menu_add_funds"),
+        telebot.types.InlineKeyboardButton("💰 WALLET", callback_data="main_menu_check_balance"),
     )
     markup.add(
-        telebot.types.InlineKeyboardButton("📢 Refer & Earn", callback_data="main_menu_refer"),
-        telebot.types.InlineKeyboardButton("🔎 Search Service", callback_data="main_menu_search"),
+        telebot.types.InlineKeyboardButton("👥 REFER & EARN", callback_data="main_menu_refer"),
+        telebot.types.InlineKeyboardButton("📞 SUPPORT", callback_data="main_menu_support"),
     )
+    markup.add(telebot.types.InlineKeyboardButton("ℹ️ HELP", callback_data="main_menu_help"))
     return markup
+
+
+def main_menu_caption(user_id, first_name=None):
+    name = escape(str(first_name or "there").strip() or "there")
+    balance = float(user_balances.get(user_id, 0))
+    return (
+        f"👋 Welcome, {name}!\n\n"
+        "🚀 <b>Bobby SMM Panel</b>\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        f"💰 Wallet Balance: ₹{balance:.2f}\n"
+        "⚡ Fast Delivery • Best Rates • 24/7 Support\n"
+        "━━━━━━━━━━━━━━━━━━\n\n"
+        "🛍️ Choose an option below:"
+    )
+
+
+def send_main_menu(chat_id, first_name=None):
+    caption = main_menu_caption(chat_id, first_name)
+    photo_file_id = str(cfg.get("main_menu_photo_file_id") or "").strip()
+    if photo_file_id:
+        try:
+            return bot.send_photo(chat_id, photo_file_id, caption=caption, reply_markup=main_menu())
+        except Exception as exc:
+            print(f"[MAIN MENU PHOTO ERROR] {type(exc).__name__}: {exc}")
+    return bot.send_message(chat_id, caption, reply_markup=main_menu())
 
 
 def make_dummy_message(chat_id, text):
@@ -709,6 +736,18 @@ def trigger_main_menu_action(call, action_text):
         refer_earn(message)
     elif action_text == "🔎 Search Service":
         search_service(message)
+    elif action_text == "📞 Support":
+        bot.send_message(
+            call.message.chat.id,
+            f"📞 <b>Support</b>\n\nFor assistance, contact {escape(str(cfg.get('payment_contact') or primary_admin_id()))}.",
+            reply_markup=main_menu(),
+        )
+    elif action_text == "ℹ️ Help":
+        bot.send_message(
+            call.message.chat.id,
+            "ℹ️ <b>Help</b>\n\nChoose a service, enter the required link and quantity, then confirm your order.\n\nUse Wallet to check your balance or Add Funds to recharge.",
+            reply_markup=main_menu(),
+        )
 
 
 def get_service_platform(service):
@@ -1569,6 +1608,7 @@ def admin_panel_markup():
         telebot.types.InlineKeyboardButton("🌐 Edit SMM URL",     callback_data="ap_edit_smmurl"),
         telebot.types.InlineKeyboardButton("🖼 Edit QR URL",      callback_data="ap_edit_qr"),
     )
+    mk.add(telebot.types.InlineKeyboardButton("🖼 Set Main Menu Photo", callback_data="ap_set_main_menu_photo"))
     return mk
 
 
@@ -1851,6 +1891,19 @@ def admin_callback(call):
         return
 
     data = call.data
+
+    if data == "ap_set_main_menu_photo":
+        user_state[uid] = {"action": "admin_set_main_menu_photo"}
+        mk = telebot.types.InlineKeyboardMarkup()
+        mk.add(telebot.types.InlineKeyboardButton("❌ Cancel", callback_data="ap_back"))
+        bot.edit_message_text(
+            "🖼 <b>Set Main Menu Photo</b>\n\nSend the photo to use above the main menu welcome message.",
+            uid,
+            call.message.message_id,
+            reply_markup=mk,
+        )
+        bot.register_next_step_handler(call.message, process_admin_set_main_menu_photo)
+        return
 
     # ── Service management ──
     if data == "ap_sync_services":
@@ -2687,6 +2740,20 @@ def process_admin_edit_qr(message):
     bot.send_message(uid, f"✅ QR code URL updated!", reply_markup=admin_panel_markup())
 
 
+@safe_handler
+def process_admin_set_main_menu_photo(message):
+    uid = message.chat.id
+    state = user_state.pop(uid, {})
+    if state.get("action") != "admin_set_main_menu_photo" or not is_admin(uid):
+        return
+    if message.content_type != "photo" or not message.photo:
+        bot.send_message(uid, "❌ Please send a photo.", reply_markup=admin_panel_markup())
+        return
+    cfg["main_menu_photo_file_id"] = message.photo[-1].file_id
+    save_config(cfg)
+    bot.send_message(uid, "✅ Main menu photo updated.", reply_markup=admin_panel_markup())
+
+
 # ─────────────────────────────────────────────────────────────
 #  /start RydenX
 # ─────────────────────────────────────────────────────────────
@@ -2721,7 +2788,7 @@ def send_welcome(message):
     user_link = f"<a href='tg://user?id={user_id}'>{display_name}</a>"
 
     if user_has_joined_all_channels(user_id):
-        bot.send_message(user_id, "🏠 <b>Main Menu</b>", reply_markup=main_menu())
+        send_main_menu(user_id, getattr(message.from_user, "first_name", None))
         return
 
     bot.send_message(
@@ -2752,7 +2819,7 @@ def joined_button_handler(call):
     except Exception:
         pass
 
-    bot.send_message(user_id, "🏠 <b>Main Menu</b>", reply_markup=main_menu())
+    send_main_menu(user_id, getattr(call.message.chat, "first_name", None))
 
     try:
         first_name = call.message.chat.first_name or str(user_id)
@@ -2788,6 +2855,8 @@ def main_menu_action_callback(call):
         "main_menu_add_funds": "➕ Add Funds",
         "main_menu_refer": "📢 Refer & Earn",
         "main_menu_search": "🔎 Search Service",
+        "main_menu_support": "📞 Support",
+        "main_menu_help": "ℹ️ Help",
     }.get(call.data)
     if not action_text:
         return
@@ -3426,7 +3495,11 @@ def my_orders_disabled_callback(call):
 @bot.callback_query_handler(func=lambda c: c.data == "my_orders_back")
 @safe_callback
 def my_orders_back_callback(call):
-    bot.edit_message_text("🏠 <b>Main Menu</b>", call.message.chat.id, call.message.message_id, reply_markup=main_menu())
+    try:
+        bot.delete_message(call.message.chat.id, call.message.message_id)
+    except Exception:
+        pass
+    send_main_menu(call.message.chat.id, getattr(call.message.chat, "first_name", None))
 
 
 @bot.message_handler(func=lambda m: m.text == "📜 Order History")
