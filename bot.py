@@ -711,56 +711,82 @@ def trigger_main_menu_action(call, action_text):
         search_service(message)
 
 
-def get_enabled_service_categories():
-    grouped = get_enabled_services_by_category()
-    return sorted(grouped.keys(), key=lambda text: text.lower())
+def get_service_platform(service):
+    platform = str(service.get("platform") or "").strip()
+    if platform:
+        return platform
+
+    category = str(service.get("category") or "General").strip() or "General"
+    return category.split(None, 1)[0]
 
 
-def get_category_id_from_name(category_name):
-    categories = get_enabled_service_categories()
+def format_service_platform(platform):
+    icons = {
+        "instagram": "📸",
+        "youtube": "▶️",
+        "telegram": "✈️",
+        "facebook": "👍",
+        "twitter": "🐦",
+        "twitter/x": "🐦",
+        "x": "🐦",
+        "tiktok": "🎵",
+    }
+    icon = icons.get(str(platform).strip().lower())
+    return f"{icon} {platform}" if icon else str(platform)
+
+
+def get_enabled_services_by_platform_category():
+    services = list(services_collection.find({"enabled": True}).sort([("category", 1), ("name", 1)]))
+    grouped = {}
+    for service in services:
+        platform = get_service_platform(service)
+        category = str(service.get("category") or "General").strip() or "General"
+        grouped.setdefault(platform, {}).setdefault(category, []).append(service)
+    return grouped
+
+
+def get_platform_name_from_id(platform_id):
+    platforms = sorted(get_enabled_services_by_platform_category(), key=lambda text: text.lower())
     try:
-        return categories.index(str(category_name))
-    except ValueError:
-        return 0
+        platform_id = int(platform_id)
+    except (TypeError, ValueError):
+        return None
+    if 0 <= platform_id < len(platforms):
+        return platforms[platform_id]
+    return None
 
 
-def get_category_name_from_id(category_id):
+def get_category_name_from_id(platform, category_id):
+    categories = sorted(
+        get_enabled_services_by_platform_category().get(platform, {}),
+        key=lambda text: text.lower()
+    )
     try:
         category_id = int(category_id)
     except (TypeError, ValueError):
         return None
-    categories = get_enabled_service_categories()
     if 0 <= category_id < len(categories):
         return categories[category_id]
     return None
 
 
-def get_enabled_services_by_category():
-    services = list(services_collection.find({"enabled": True}).sort([("category", 1), ("name", 1)]))
-    grouped = {}
-    for service in services:
-        category = str(service.get("category") or "General").strip() or "General"
-        grouped.setdefault(category, []).append(service)
-    return grouped
-
-
 def service_catalog_home_markup(page=0, page_size=6):
-    grouped = get_enabled_services_by_category()
+    grouped = get_enabled_services_by_platform_category()
     markup = telebot.types.InlineKeyboardMarkup(row_width=1)
-    categories = get_enabled_service_categories()
-    if not categories:
+    platforms = sorted(grouped, key=lambda text: text.lower())
+    if not platforms:
         markup.add(telebot.types.InlineKeyboardButton("🏠 Home", callback_data="svc_catalog_home"))
         return markup
 
-    total_pages = max(1, (len(categories) + page_size - 1) // page_size)
+    total_pages = max(1, (len(platforms) + page_size - 1) // page_size)
     page = max(0, min(page, total_pages - 1))
     start = page * page_size
     end = start + page_size
-    for category_id, category in enumerate(categories[start:end], start=start):
-        services_count = len(grouped[category])
+    for platform_id, platform in enumerate(platforms[start:end], start=start):
+        service_count = sum(len(services) for services in grouped[platform].values())
         markup.add(telebot.types.InlineKeyboardButton(
-            f"{category} ({services_count})",
-            callback_data=f"svc_catalog_category:{category_id}"
+            f"{format_service_platform(platform)} ({service_count})",
+            callback_data=f"svc_catalog_platform:{platform_id}"
         ))
 
     if total_pages > 1:
@@ -779,15 +805,53 @@ def service_catalog_home_markup(page=0, page_size=6):
     return markup
 
 
-def service_catalog_category_markup(category, page=0, page_size=6):
-    grouped = get_enabled_services_by_category()
+def service_catalog_platform_markup(platform, page=0, page_size=6):
+    grouped = get_enabled_services_by_platform_category().get(platform, {})
+    markup = telebot.types.InlineKeyboardMarkup(row_width=1)
+    categories = sorted(grouped, key=lambda text: text.lower())
+    total_pages = max(1, (len(categories) + page_size - 1) // page_size)
+    page = max(0, min(page, total_pages - 1))
+    start = page * page_size
+    end = start + page_size
+    platform_id = sorted(
+        get_enabled_services_by_platform_category(), key=lambda text: text.lower()
+    ).index(platform)
+    for category_id, category in enumerate(categories[start:end], start=start):
+        service_count = len(grouped[category])
+        markup.add(telebot.types.InlineKeyboardButton(
+            f"{category} ({service_count})",
+            callback_data=f"svc_catalog_category:{platform_id}:{category_id}"
+        ))
+
+    if total_pages > 1:
+        nav_row = []
+        nav_row.append(telebot.types.InlineKeyboardButton(
+            "⬅️ Previous" if page > 0 else "⬅️ Previous",
+            callback_data=f"svc_catalog_platform_page:{platform_id}:{page - 1}" if page > 0 else "svc_catalog_page_disabled"
+        ))
+        nav_row.append(telebot.types.InlineKeyboardButton(
+            "➡️ Next" if page + 1 < total_pages else "➡️ Next",
+            callback_data=f"svc_catalog_platform_page:{platform_id}:{page + 1}" if page + 1 < total_pages else "svc_catalog_page_disabled"
+        ))
+        markup.row(*nav_row)
+
+    markup.add(telebot.types.InlineKeyboardButton("⬅️ Back", callback_data="svc_catalog_home"))
+    return markup
+
+
+def service_catalog_category_markup(platform, category, page=0, page_size=6):
+    grouped = get_enabled_services_by_platform_category().get(platform, {})
     services = grouped.get(category, [])
     markup = telebot.types.InlineKeyboardMarkup(row_width=1)
     total_pages = max(1, (len(services) + page_size - 1) // page_size)
     page = max(0, min(page, total_pages - 1))
     start = page * page_size
     end = start + page_size
-    category_id = get_category_id_from_name(category)
+    platform_id = sorted(
+        get_enabled_services_by_platform_category(), key=lambda text: text.lower()
+    ).index(platform)
+    categories = sorted(grouped, key=lambda text: text.lower())
+    category_id = categories.index(category)
     for service in services[start:end]:
         markup.add(telebot.types.InlineKeyboardButton(
             service["name"],
@@ -797,22 +861,29 @@ def service_catalog_category_markup(category, page=0, page_size=6):
     if total_pages > 1:
         nav_row = []
         nav_row.append(telebot.types.InlineKeyboardButton(
-            "⬅️ Previous" if page > 0 else "⬅️ Previous",
-            callback_data=f"svc_catalog_category_page:{category_id}:{page - 1}" if page > 0 else "svc_catalog_page_disabled"
+            "⬅️ Previous",
+            callback_data=f"svc_catalog_category_page:{platform_id}:{category_id}:{page - 1}" if page > 0 else "svc_catalog_page_disabled"
         ))
         nav_row.append(telebot.types.InlineKeyboardButton(
-            "➡️ Next" if page + 1 < total_pages else "➡️ Next",
-            callback_data=f"svc_catalog_category_page:{category_id}:{page + 1}" if page + 1 < total_pages else "svc_catalog_page_disabled"
+            "➡️ Next",
+            callback_data=f"svc_catalog_category_page:{platform_id}:{category_id}:{page + 1}" if page + 1 < total_pages else "svc_catalog_page_disabled"
         ))
         markup.row(*nav_row)
 
-    markup.add(telebot.types.InlineKeyboardButton("⬅️ Back", callback_data="svc_catalog_home"))
+    markup.add(telebot.types.InlineKeyboardButton("⬅️ Back", callback_data=f"svc_catalog_platform:{platform_id}"))
     markup.add(telebot.types.InlineKeyboardButton("🏠 Home", callback_data="svc_catalog_home"))
     return markup
 
 
-def service_catalog_details_markup(service_id, category):
-    category_id = get_category_id_from_name(category)
+def service_catalog_details_markup(service_id, platform, category):
+    platform_id = sorted(
+        get_enabled_services_by_platform_category(), key=lambda text: text.lower()
+    ).index(platform)
+    categories = sorted(
+        get_enabled_services_by_platform_category().get(platform, {}),
+        key=lambda text: text.lower()
+    )
+    category_id = categories.index(category)
     markup = telebot.types.InlineKeyboardMarkup(row_width=1)
     markup.add(telebot.types.InlineKeyboardButton(
         "🛒 Order Now",
@@ -820,14 +891,14 @@ def service_catalog_details_markup(service_id, category):
     ))
     markup.add(telebot.types.InlineKeyboardButton(
         "⬅️ Back",
-        callback_data=f"svc_catalog_category:{category_id}"
+        callback_data=f"svc_catalog_category:{platform_id}:{category_id}"
     ))
     markup.add(telebot.types.InlineKeyboardButton("🏠 Home", callback_data="svc_catalog_home"))
     return markup
 
 
 def send_service_catalog_home(message):
-    grouped = get_enabled_services_by_category()
+    grouped = get_enabled_services_by_platform_category()
     if not grouped:
         bot.send_message(
             message.chat.id,
@@ -877,30 +948,80 @@ def service_catalog_home_page_callback(call):
 @bot.callback_query_handler(func=lambda c: c.data == "svc_catalog_home_disabled")
 @safe_callback
 def service_catalog_home_disabled_callback(call):
-    bot.answer_callback_query(call.id, "No more categories to show.")
+    bot.answer_callback_query(call.id, "No more platforms to show.")
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("svc_catalog_platform:"))
+@safe_callback
+def service_catalog_platform_callback(call):
+    platform_id = call.data.split(":", 1)[1]
+    platform = get_platform_name_from_id(platform_id)
+    if platform is None:
+        bot.answer_callback_query(call.id, "❌ Invalid platform.")
+        return
+
+    grouped = get_enabled_services_by_platform_category()
+    if not grouped.get(platform):
+        bot.answer_callback_query(call.id, "❌ No categories in this platform.")
+        return
+
+    bot.edit_message_text(
+        f"📂 <b>{escape(platform)}</b>\n\nSelect a category:",
+        call.message.chat.id,
+        call.message.message_id,
+        reply_markup=service_catalog_platform_markup(platform)
+    )
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("svc_catalog_platform_page:"))
+@safe_callback
+def service_catalog_platform_page_callback(call):
+    try:
+        _, platform_id, page_str = call.data.split(":", 2)
+        page = int(page_str)
+    except (TypeError, ValueError):
+        bot.answer_callback_query(call.id, "❌ Invalid platform page.")
+        return
+
+    platform = get_platform_name_from_id(platform_id)
+    if platform is None:
+        bot.answer_callback_query(call.id, "❌ Invalid platform.")
+        return
+
+    bot.edit_message_text(
+        f"📂 <b>{escape(platform)}</b>\n\nSelect a category:",
+        call.message.chat.id,
+        call.message.message_id,
+        reply_markup=service_catalog_platform_markup(platform, page=page)
+    )
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("svc_catalog_category:"))
 @safe_callback
 def service_catalog_category_callback(call):
-    category_id = call.data.split(":", 1)[1]
-    category = get_category_name_from_id(category_id)
-    if category is None:
+    try:
+        _, platform_id, category_id = call.data.split(":", 2)
+    except ValueError:
         bot.answer_callback_query(call.id, "❌ Invalid category.")
         return
 
-    grouped = get_enabled_services_by_category()
-    services = grouped.get(category, [])
+    platform = get_platform_name_from_id(platform_id)
+    category = get_category_name_from_id(platform, category_id) if platform else None
+    if platform is None or category is None:
+        bot.answer_callback_query(call.id, "❌ Invalid category.")
+        return
+
+    services = get_enabled_services_by_platform_category().get(platform, {}).get(category, [])
     if not services:
         bot.answer_callback_query(call.id, "❌ No services in this category.")
         return
 
-    text = f"📂 <b>{escape(category)}</b>\n\nSelect a service:"
+    text = f"📂 <b>{escape(platform)}</b>\n📁 <b>{escape(category)}</b>\n\nSelect a service:"
     bot.edit_message_text(
         text,
         call.message.chat.id,
         call.message.message_id,
-        reply_markup=service_catalog_category_markup(category)
+        reply_markup=service_catalog_category_markup(platform, category)
     )
 
 
@@ -908,28 +1029,28 @@ def service_catalog_category_callback(call):
 @safe_callback
 def service_catalog_category_page_callback(call):
     try:
-        _, category_id, page_str = call.data.split(":", 2)
+        _, platform_id, category_id, page_str = call.data.split(":", 3)
         page = int(page_str)
     except (TypeError, ValueError):
         bot.answer_callback_query(call.id, "❌ Invalid category page.")
         return
 
-    category = get_category_name_from_id(category_id)
-    if category is None:
+    platform = get_platform_name_from_id(platform_id)
+    category = get_category_name_from_id(platform, category_id) if platform else None
+    if platform is None or category is None:
         bot.answer_callback_query(call.id, "❌ Invalid category.")
         return
 
-    grouped = get_enabled_services_by_category()
-    services = grouped.get(category, [])
+    services = get_enabled_services_by_platform_category().get(platform, {}).get(category, [])
     if not services:
         bot.answer_callback_query(call.id, "❌ No services in this category.")
         return
-    text = f"📂 <b>{escape(category)}</b>\n\nSelect a service:"
+    text = f"📂 <b>{escape(platform)}</b>\n📁 <b>{escape(category)}</b>\n\nSelect a service:"
     bot.edit_message_text(
         text,
         call.message.chat.id,
         call.message.message_id,
-        reply_markup=service_catalog_category_markup(category, page=page)
+        reply_markup=service_catalog_category_markup(platform, category, page=page)
     )
 
 
@@ -948,6 +1069,7 @@ def service_catalog_service_callback(call):
         bot.answer_callback_query(call.id, "❌ This service is no longer available.")
         return
 
+    platform = get_service_platform(service)
     category = str(service.get("category") or "General").strip() or "General"
     lines = [
         f"📦 <b>{escape(str(service['name']))}</b>",
@@ -965,7 +1087,7 @@ def service_catalog_service_callback(call):
         "\n".join(lines),
         call.message.chat.id,
         call.message.message_id,
-        reply_markup=service_catalog_details_markup(service_id, category)
+        reply_markup=service_catalog_details_markup(service_id, platform, category)
     )
 
 
