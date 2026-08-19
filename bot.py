@@ -3386,23 +3386,22 @@ def process_track_order(message):
 
 
 def get_order_status_for_display(order):
-    order_id = order.get("order_id")
-    if order_id is None:
-        return "Completed"
-
-    reservation = wallet_reservations_collection.find_one({"order_id": order_id})
-    if reservation:
-        status = reservation.get("status")
-        if status == "settled":
-            return "Completed"
-        if status == "pending":
-            return "Pending"
-        if status == "released":
-            return "Released"
+    for field in ("status", "order_status", "provider_status"):
+        status = order.get(field)
         if status:
-            return str(status).title()
+            return str(status)
 
-    return "Completed"
+    provider_response = order.get("provider_response")
+    if isinstance(provider_response, dict) and provider_response.get("status"):
+        return str(provider_response["status"])
+
+    order_id = order.get("order_id")
+    if order_id is not None:
+        reservation = wallet_reservations_collection.find_one({"order_id": order_id})
+        if reservation and reservation.get("status"):
+            return str(reservation["status"])
+
+    return "Not available"
 
 
 def get_order_amount_for_display(order):
@@ -3430,7 +3429,12 @@ def render_my_orders_page(user_id, page=0, page_size=5):
     page_orders = orders[start:end]
 
     if not page_orders:
-        return "📦 <b>My Orders</b>\n\nNo orders found.", None
+        markup = telebot.types.InlineKeyboardMarkup(row_width=2)
+        markup.add(
+            telebot.types.InlineKeyboardButton("⬅️ Back", callback_data="my_orders_back"),
+            telebot.types.InlineKeyboardButton("🏠 Home", callback_data="svc_catalog_home"),
+        )
+        return "📦 <b>My Orders</b>\n\n📦 You haven't placed any orders yet.", markup
 
     lines = ["📦 <b>My Orders</b>", f"Page {page + 1}/{total_pages}"]
     for order in page_orders:
@@ -3456,7 +3460,7 @@ def render_my_orders_page(user_id, page=0, page_size=5):
     else:
         markup.add(telebot.types.InlineKeyboardButton("➡️ Next", callback_data="my_orders_disabled"))
     markup.add(
-        telebot.types.InlineKeyboardButton("🔙 Back", callback_data="my_orders_back"),
+        telebot.types.InlineKeyboardButton("⬅️ Back", callback_data="my_orders_back"),
         telebot.types.InlineKeyboardButton("🏠 Home", callback_data="svc_catalog_home"),
     )
     return "\n".join(lines), markup
@@ -3478,11 +3482,16 @@ def my_orders(message):
 @safe_callback
 def my_orders_page_callback(call):
     user_id = call.message.chat.id
-    page = int(call.data.split(":", 1)[1])
-    text, markup = render_my_orders_page(user_id, page=page)
-    if markup is None:
-        bot.edit_message_text(text, user_id, call.message.message_id)
+    try:
+        page = int(call.data.split(":", 1)[1])
+    except (IndexError, TypeError, ValueError):
+        bot.answer_callback_query(call.id, "This page is no longer available.")
         return
+    if page < 0:
+        bot.answer_callback_query(call.id, "This page is no longer available.")
+        return
+    bot.answer_callback_query(call.id)
+    text, markup = render_my_orders_page(user_id, page=page)
     bot.edit_message_text(text, user_id, call.message.message_id, reply_markup=markup, disable_web_page_preview=True)
 
 
