@@ -736,49 +736,74 @@ def format_service_platform(platform):
 
 
 ALLOWED_USER_SERVICE_CATEGORIES = {
-    "Instagram": {"Followers", "Likes", "Views", "Comments", "Story Views", "Reels Views", "Saves", "Shares"},
-    "YouTube": {"Subscribers", "Likes", "Views", "Comments"},
-    "Telegram": {"Members", "Views", "Reactions", "Comments"},
-    "Facebook": {"Followers", "Likes", "Views", "Comments"},
-    "Twitter/X": {"Followers", "Likes", "Views", "Retweets", "Comments"},
-    "TikTok": {"Followers", "Likes", "Views", "Comments"},
+    "Instagram": ("Followers", "Likes", "Views", "Comments", "Story Views", "Reels Views", "Saves", "Shares"),
+    "YouTube": ("Subscribers", "Likes", "Views", "Comments"),
+    "Telegram": ("Members", "Views", "Reactions", "Comments"),
+    "Facebook": ("Followers", "Likes", "Views", "Comments"),
+    "Twitter/X": ("Followers", "Likes", "Views", "Retweets", "Comments"),
+    "TikTok": ("Followers", "Likes", "Views", "Comments"),
 }
 
+PLATFORM_ALIASES = {
+    "instagram": "Instagram",
+    "insta": "Instagram",
+    "ig": "Instagram",
+    "youtube": "YouTube",
+    "yt": "YouTube",
+    "telegram": "Telegram",
+    "tg": "Telegram",
+    "facebook": "Facebook",
+    "fb": "Facebook",
+    "twitter": "Twitter/X",
+    "twitter/x": "Twitter/X",
+    "x": "Twitter/X",
+    "tiktok": "TikTok",
+}
+
+SERVICE_TYPE_ALIASES = (
+    ("Story Views", ("story views?",)),
+    ("Reels Views", ("reels? views?", "shorts? views?")),
+    ("Subscribers", ("subscribers?", "subs?")),
+    ("Followers", ("followers?", "fans?")),
+    ("Retweets", ("retweets?", "reposts?")),
+    ("Comments", ("comments?",)),
+    ("Reactions", ("reactions?",)),
+    ("Members", ("members?",)),
+    ("Likes", ("likes?",)),
+    ("Views", ("views?",)),
+    ("Saves", ("saves?", "bookmarks?")),
+    ("Shares", ("shares?",)),
+)
+
+
+def find_platform(text):
+    normalized = str(text or "").lower().replace("tiktok", "tik tok")
+    for alias in sorted(PLATFORM_ALIASES, key=len, reverse=True):
+        if re.search(rf"(?<![a-z0-9]){re.escape(alias)}(?![a-z0-9])", normalized):
+            return PLATFORM_ALIASES[alias]
+    return None
+
+
+def find_service_type(text):
+    normalized = str(text or "").lower()
+    for display_type, patterns in SERVICE_TYPE_ALIASES:
+        if any(re.search(rf"(?<![a-z0-9]){pattern}(?![a-z0-9])", normalized) for pattern in patterns):
+            return display_type
+    return None
 
 def get_user_catalog_service_parts(service):
-    """Return the allowed display platform/category, or None for hidden services."""
-    raw_platform = str(service.get("platform") or "").strip()
-    raw_category = str(service.get("category") or "").strip()
-    platform = raw_platform
-    category = raw_category
-
-    platform_aliases = {
-        "instagram": "Instagram",
-        "youtube": "YouTube",
-        "telegram": "Telegram",
-        "facebook": "Facebook",
-        "twitter": "Twitter/X",
-        "twitter/x": "Twitter/X",
-        "x": "Twitter/X",
-        "tiktok": "TikTok",
-    }
-    if platform:
-        platform = platform_aliases.get(platform.lower())
-    else:
-        for alias, display_platform in sorted(platform_aliases.items(), key=lambda item: -len(item[0])):
-            match = re.match(rf"^{re.escape(alias)}(?:\s*[-:/|_]\s*|\s+)(.+)$", raw_category, re.IGNORECASE)
-            if match:
-                platform = display_platform
-                category = match.group(1).strip()
-                break
-
-    if not platform or platform not in ALLOWED_USER_SERVICE_CATEGORIES:
+    """Return normalized catalog parts from provider platform, category, and name."""
+    raw_platform = str(service.get("platform") or "")
+    raw_category = str(service.get("category") or "")
+    raw_name = str(service.get("name") or "")
+    platform = find_platform(raw_platform)
+    if not platform:
+        platform = find_platform(f"{raw_category} {raw_name}")
+    if not platform:
         return None
 
-    category = re.sub(r"^[\s:/|_-]+", "", category)
-    allowed_categories = ALLOWED_USER_SERVICE_CATEGORIES[platform]
-    category = next((allowed for allowed in allowed_categories if allowed.lower() == category.lower()), None)
-    if category is None:
+    category = find_service_type(f"{raw_category} {raw_name}")
+    if category not in ALLOWED_USER_SERVICE_CATEGORIES[platform]:
         return None
     return platform, category
 
