@@ -735,12 +735,66 @@ def format_service_platform(platform):
     return f"{icon} {platform}" if icon else str(platform)
 
 
+ALLOWED_USER_SERVICE_CATEGORIES = {
+    "Instagram": {"Followers", "Likes", "Views", "Comments", "Story Views", "Reels Views", "Saves", "Shares"},
+    "YouTube": {"Subscribers", "Likes", "Views", "Comments"},
+    "Telegram": {"Members", "Views", "Reactions", "Comments"},
+    "Facebook": {"Followers", "Likes", "Views", "Comments"},
+    "Twitter/X": {"Followers", "Likes", "Views", "Retweets", "Comments"},
+    "TikTok": {"Followers", "Likes", "Views", "Comments"},
+}
+
+
+def get_user_catalog_service_parts(service):
+    """Return the allowed display platform/category, or None for hidden services."""
+    raw_platform = str(service.get("platform") or "").strip()
+    raw_category = str(service.get("category") or "").strip()
+    platform = raw_platform
+    category = raw_category
+
+    platform_aliases = {
+        "instagram": "Instagram",
+        "youtube": "YouTube",
+        "telegram": "Telegram",
+        "facebook": "Facebook",
+        "twitter": "Twitter/X",
+        "twitter/x": "Twitter/X",
+        "x": "Twitter/X",
+        "tiktok": "TikTok",
+    }
+    if platform:
+        platform = platform_aliases.get(platform.lower())
+    else:
+        for alias, display_platform in sorted(platform_aliases.items(), key=lambda item: -len(item[0])):
+            match = re.match(rf"^{re.escape(alias)}(?:\s*[-:/|_]\s*|\s+)(.+)$", raw_category, re.IGNORECASE)
+            if match:
+                platform = display_platform
+                category = match.group(1).strip()
+                break
+
+    if not platform or platform not in ALLOWED_USER_SERVICE_CATEGORIES:
+        return None
+
+    category = re.sub(r"^[\s:/|_-]+", "", category)
+    allowed_categories = ALLOWED_USER_SERVICE_CATEGORIES[platform]
+    category = next((allowed for allowed in allowed_categories if allowed.lower() == category.lower()), None)
+    if category is None:
+        return None
+    return platform, category
+
+
+def is_user_catalog_service(service):
+    return bool(service and service.get("enabled") and get_user_catalog_service_parts(service))
+
+
 def get_enabled_services_by_platform_category():
     services = list(services_collection.find({"enabled": True}).sort([("category", 1), ("name", 1)]))
     grouped = {}
     for service in services:
-        platform = get_service_platform(service)
-        category = str(service.get("category") or "General").strip() or "General"
+        parts = get_user_catalog_service_parts(service)
+        if not parts:
+            continue
+        platform, category = parts
         grouped.setdefault(platform, {}).setdefault(category, []).append(service)
     return grouped
 
@@ -1065,12 +1119,11 @@ def service_catalog_page_disabled_callback(call):
 def service_catalog_service_callback(call):
     service_id = call.data.split(":", 1)[1]
     service = get_service_by_id(service_id, enabled_only=True)
-    if not service:
+    if not is_user_catalog_service(service):
         bot.answer_callback_query(call.id, "❌ This service is no longer available.")
         return
 
-    platform = get_service_platform(service)
-    category = str(service.get("category") or "General").strip() or "General"
+    platform, category = get_user_catalog_service_parts(service)
     lines = [
         f"📦 <b>{escape(str(service['name']))}</b>",
         f"Category: <b>{escape(category)}</b>",
@@ -1096,7 +1149,7 @@ def service_catalog_service_callback(call):
 def service_catalog_order_now_callback(call):
     service_id = call.data.split(":", 1)[1]
     service = get_service_by_id(service_id, enabled_only=True)
-    if not service:
+    if not is_user_catalog_service(service):
         bot.answer_callback_query(call.id, "❌ This service is no longer available.")
         return
 
@@ -2777,7 +2830,8 @@ def process_service_search(message):
     services = list(services_collection.find({
         "enabled": True,
         "$or": [{"name": matcher}, {"category": matcher}]
-    }).sort([("category", 1), ("name", 1)]).limit(20))
+    }).sort([("category", 1), ("name", 1)]))
+    services = [service for service in services if is_user_catalog_service(service)][:20]
     if not services:
         bot.send_message(user_id, "❌ No enabled services matched your search.")
         return
@@ -2795,7 +2849,7 @@ def process_service_search(message):
 def order_service_callback(call):
     service_id = call.data.split(":", 1)[1]
     service = get_service_by_id(service_id, enabled_only=True)
-    if not service:
+    if not is_user_catalog_service(service):
         bot.answer_callback_query(call.id, "❌ This service is no longer enabled.")
         return
     bot.answer_callback_query(call.id)
