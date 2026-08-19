@@ -2520,6 +2520,10 @@ def send_welcome(message):
     persist_user(user_id)
     user_link = f"<a href='tg://user?id={user_id}'>{display_name}</a>"
 
+    if user_has_joined_all_channels(user_id):
+        bot.send_message(user_id, "🏠 <b>Main Menu</b>", reply_markup=main_menu())
+        return
+
     bot.send_message(
         user_id,
         f"❤️ 𝘿𝙀𝘼𝙍 {user_link},\n\n"
