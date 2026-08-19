@@ -836,7 +836,7 @@ def send_service_catalog_home(message):
         )
         return
 
-    lines = ["🛍 <b>Services</b>", "Select a category:"]
+    lines = ["🛍 <b>Order Services</b>", "📂 <b>Categories / Platforms</b>"]
     text = "\n".join(lines)
     bot.send_message(message.chat.id, text, reply_markup=service_catalog_home_markup())
 
@@ -852,7 +852,7 @@ def service_catalog_entry(message):
 @safe_callback
 def service_catalog_home_callback(call):
     bot.edit_message_text(
-        "🛍 <b>Services</b>\n\nSelect a category:",
+        "🛍 <b>Order Services</b>\n\n📂 <b>Categories / Platforms</b>",
         call.message.chat.id,
         call.message.message_id,
         reply_markup=service_catalog_home_markup()
@@ -867,7 +867,7 @@ def service_catalog_home_page_callback(call):
     except (TypeError, ValueError):
         page = 0
     bot.edit_message_text(
-        "🛍 <b>Services</b>\n\nSelect a category:",
+        "🛍 <b>Order Services</b>\n\n📂 <b>Categories / Platforms</b>",
         call.message.chat.id,
         call.message.message_id,
         reply_markup=service_catalog_home_markup(page=page)
