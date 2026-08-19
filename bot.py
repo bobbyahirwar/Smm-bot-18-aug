@@ -521,11 +521,15 @@ def get_enabled_services():
 
 
 def get_provider_rate(service):
-    provider_rate = _safe_float(
-        service.get("provider_rate"),
-        _safe_float(service.get("price"), 0.0)
-    )
-    return provider_rate
+    for field in ("rate", "cost"):
+        legacy_rate = _safe_float(service.get(field), 0.0)
+        if legacy_rate > 0:
+            return legacy_rate
+
+    provider_rate = _safe_float(service.get("provider_rate"), 0.0)
+    if provider_rate > 0:
+        return provider_rate
+    return _safe_float(service.get("price"), 0.0)
 
 
 def get_selling_rate(service):
@@ -1216,8 +1220,7 @@ def service_catalog_service_callback(call):
         f"Category: <b>{escape(category)}</b>",
         f"Min: <b>{service.get('min', 'N/A')}</b>",
         f"Max: <b>{service.get('max', 'N/A')}</b>",
-        f"Provider rate: <b>₹{get_provider_rate(service):.2f}</b> / 1000\n"
-        f"Selling rate: <b>₹{get_selling_rate(service):.2f}</b> / 1000",
+        f"💰 Price: <b>₹{get_selling_rate(service):.2f}</b> / 1000",
     ]
     description = str(service.get("description") or "").strip()
     if description:
@@ -1779,10 +1782,13 @@ def normalize_provider_service_payload(payload):
             maximum = minimum
         provider_rate = _safe_float(
             item.get("provider_rate"),
-            _safe_float(item.get("price"), _safe_float(item.get("cost"), 1.0))
+            _safe_float(
+                item.get("rate"),
+                _safe_float(item.get("price"), _safe_float(item.get("cost"), 0.0))
+            )
         )
         if provider_rate <= 0:
-            provider_rate = 1.0
+            continue
 
         normalized.append({
             "provider_service_id": provider_id,
