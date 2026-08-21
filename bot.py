@@ -544,13 +544,39 @@ def get_provider_rate(service):
     return _safe_float(service.get("price"), 0.0)
 
 
-def get_selling_rate(service):
-    override = _safe_float(service.get("selling_rate"), 0.0)
-    if override > 0:
-        return override
-    provider_rate = get_provider_rate(service)
+def calculate_default_selling_price(provider_rate):
+    provider_rate = _safe_float(provider_rate, 0.0)
     markup = _safe_float(cfg.get("markup_percentage"), 0.0)
     return provider_rate + (provider_rate * markup / 100.0)
+
+
+def get_selling_rate(service):
+    override = _safe_float(service.get("selling_price"), 0.0)
+    if override > 0:
+        return override
+    legacy_override = _safe_float(service.get("selling_rate"), 0.0)
+    if legacy_override > 0:
+        return legacy_override
+    return calculate_default_selling_price(get_provider_rate(service))
+
+
+def format_selling_price(price):
+    return f"{float(price):.2f}".rstrip("0").rstrip(".")
+
+
+def ensure_custom_selling_prices():
+    for service in services_collection.find({}):
+        if _safe_float(service.get("selling_price"), 0.0) > 0:
+            continue
+        default_price = get_selling_rate(service)
+        if default_price > 0:
+            services_collection.update_one(
+                {"_id": service["_id"]},
+                {"$set": {"selling_price": default_price}}
+            )
+
+
+ensure_custom_selling_prices()
 
 
 def get_order_charge(service, quantity):
@@ -977,8 +1003,9 @@ def service_catalog_platform_markup(platform, page=0, page_size=6):
     ).index(platform)
     for category_id, category in enumerate(categories[start:end], start=start):
         service_count = len(grouped[category])
+        category_price = min(get_selling_rate(service) for service in grouped[category])
         markup.add(telebot.types.InlineKeyboardButton(
-            f"{category} ({service_count})",
+            f"{format_service_platform(platform)} {category} — ₹{format_selling_price(category_price)}/1K ({service_count})",
             callback_data=f"svc_catalog_category:{platform_id}:{category_id}"
         ))
 
@@ -1648,6 +1675,7 @@ def admin_panel_markup():
     mk.add(
         telebot.types.InlineKeyboardButton("🔧 Edit Service IDs", callback_data="ap_service_ids"),
     )
+    mk.add(telebot.types.InlineKeyboardButton("💰 Edit Selling Prices", callback_data="ap_service_prices"))
     mk.add(
         telebot.types.InlineKeyboardButton("🔑 Edit API Key",     callback_data="ap_edit_apikey"),
         telebot.types.InlineKeyboardButton("📡 Set Logs Channel", callback_data="ap_set_logs"),
@@ -1854,6 +1882,15 @@ def sync_provider_services():
             "min": service["min"],
             "max": service["max"],
             "provider_rate": service["provider_rate"],
+            "selling_price": (
+                existing.get("selling_price")
+                if existing and _safe_float(existing.get("selling_price"), 0.0) > 0
+                else (
+                    existing.get("selling_rate")
+                    if existing and _safe_float(existing.get("selling_rate"), 0.0) > 0
+                    else calculate_default_selling_price(service["provider_rate"])
+                )
+            ),
             "enabled": existing.get("enabled", True) if existing else True,
         }
         if existing:
@@ -1937,7 +1974,7 @@ def admin_panel(message):
 # ─────────────────────────────────────────────────────────────
 #  ADMIN PANEL CALLBACKS
 # ─────────────────────────────────────────────────────────────
-@bot.callback_query_handler(func=lambda c: c.data.startswith("ap_") or c.data.startswith("rate_") or c.data.startswith("sid_") or c.data.startswith("svc_admin_"))
+@bot.callback_query_handler(func=lambda c: c.data.startswith("ap_") or c.data.startswith("rate_") or c.data.startswith("sid_") or c.data.startswith("svc_admin_") or c.data.startswith("svc_price_select:"))
 @safe_callback
 def admin_callback(call):
     reload_cfg()
@@ -1994,6 +2031,40 @@ def admin_callback(call):
             services_admin_text(), uid, call.message.message_id,
             reply_markup=services_admin_markup()
         )
+        return
+
+    if data == "ap_service_prices":
+        user_state[uid] = {"action": "admin_service_price_search"}
+        mk = telebot.types.InlineKeyboardMarkup()
+        mk.add(telebot.types.InlineKeyboardButton("❌ Cancel", callback_data="ap_back"))
+        bot.edit_message_text(
+            "💰 <b>Edit Selling Price</b>\n\n"
+            "Search by service name, category, platform, or provider service ID:",
+            uid, call.message.message_id, reply_markup=mk
+        )
+        bot.register_next_step_handler(call.message, process_admin_service_price_search)
+        return
+
+    if data.startswith("svc_price_select:"):
+        service_id = data.split(":", 1)[1]
+        service = get_service_by_id(service_id)
+        if not service or not service.get("enabled") or not is_user_catalog_service(service):
+            bot.answer_callback_query(call.id, "Service not found or not in the user catalog.")
+            return
+        user_state[uid] = {"action": "admin_service_price_edit", "service_id": service_id}
+        current_price = get_selling_rate(service)
+        mk = telebot.types.InlineKeyboardMarkup()
+        mk.add(telebot.types.InlineKeyboardButton(
+            "❌ Cancel", callback_data="ap_service_prices"
+        ))
+        bot.edit_message_text(
+            f"💰 <b>{escape(str(service['name']))}</b>\n\n"
+            f"Provider service ID: <code>{service['provider_service_id']}</code>\n"
+            f"Current selling price: <b>₹{format_selling_price(current_price)}/1K</b>\n\n"
+            "Send the new customer selling price per 1000:",
+            uid, call.message.message_id, reply_markup=mk
+        )
+        bot.register_next_step_handler(call.message, process_admin_service_price_input)
         return
 
     if data == "svc_admin_add":
@@ -2671,6 +2742,83 @@ def process_admin_edit_sid(message):
 
 
 @safe_handler
+def process_admin_service_price_search(message):
+    uid = message.chat.id
+    state = user_state.pop(uid, {})
+    if state.get("action") != "admin_service_price_search" or not is_admin(uid):
+        return
+    if message.content_type != "text":
+        bot.send_message(uid, "❌ Send a text search term.", reply_markup=admin_panel_markup())
+        return
+
+    query = message.text.strip()
+    if not query:
+        bot.send_message(uid, "❌ Enter a service name, category, platform, or provider service ID.", reply_markup=admin_panel_markup())
+        return
+
+    query_lower = query.lower()
+    services = []
+    for service in services_collection.find({"enabled": True}).sort([("category", 1), ("name", 1)]):
+        if not is_user_catalog_service(service):
+            continue
+        platform, category = get_user_catalog_service_parts(service)
+        searchable = " ".join([
+            str(service.get("name") or ""),
+            str(service.get("category") or ""),
+            str(service.get("provider_service_id") or ""),
+            platform,
+            category,
+        ]).lower()
+        if query_lower in searchable:
+            services.append(service)
+    services = services[:20]
+    if not services:
+        bot.send_message(uid, "❌ No enabled user-catalog services matched your search.", reply_markup=admin_panel_markup())
+        return
+
+    markup = telebot.types.InlineKeyboardMarkup(row_width=1)
+    for service in services:
+        platform, _ = get_user_catalog_service_parts(service)
+        markup.add(telebot.types.InlineKeyboardButton(
+            f"{format_service_platform(platform)} {service['name']} — "
+            f"₹{format_selling_price(get_selling_rate(service))}/1K",
+            callback_data=f"svc_price_select:{service['_id']}"
+        ))
+    markup.add(telebot.types.InlineKeyboardButton("🔙 Back", callback_data="ap_back"))
+    bot.send_message(uid, "💰 <b>Select a service to price:</b>", reply_markup=markup)
+
+
+@safe_handler
+def process_admin_service_price_input(message):
+    uid = message.chat.id
+    state = user_state.pop(uid, {})
+    if state.get("action") != "admin_service_price_edit" or not is_admin(uid):
+        return
+    try:
+        price = float(message.text.strip())
+        if price <= 0:
+            raise ValueError
+    except (AttributeError, ValueError):
+        bot.send_message(uid, "❌ Selling price must be a positive number.", reply_markup=admin_panel_markup())
+        return
+
+    service = get_service_by_id(state.get("service_id"))
+    if not service or not service.get("enabled") or not is_user_catalog_service(service):
+        bot.send_message(uid, "❌ Service is no longer available in the user catalog.", reply_markup=admin_panel_markup())
+        return
+    services_collection.update_one(
+        {"_id": service["_id"]},
+        {"$set": {"selling_price": price}}
+    )
+    bot.send_message(
+        uid,
+        f"✅ <b>{escape(str(service['name']))}</b> selling price updated to "
+        f"<b>₹{format_selling_price(price)}/1K</b>.",
+        reply_markup=admin_panel_markup()
+    )
+
+
+@safe_handler
 def process_admin_service_input(message):
     uid = message.chat.id
     state = user_state.pop(uid, {})
@@ -2722,7 +2870,7 @@ def process_admin_service_input(message):
         "min": minimum,
         "max": maximum,
         "provider_rate": provider_rate,
-        "selling_rate": selling_rate,
+        "selling_price": selling_rate,
         "enabled": enabled_values[enabled_key],
     }
     if state["action"] == "admin_service_edit":
