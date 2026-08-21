@@ -816,12 +816,12 @@ def format_service_platform(platform):
 
 
 ALLOWED_USER_SERVICE_CATEGORIES = {
-    "Instagram": ("Followers", "Likes", "Views", "Comments", "Story Views", "Reels Views", "Saves", "Shares"),
-    "YouTube": ("Subscribers", "Likes", "Views", "Comments"),
-    "Telegram": ("Members", "Views", "Reactions", "Comments"),
-    "Facebook": ("Followers", "Likes", "Views", "Comments"),
-    "Twitter/X": ("Followers", "Likes", "Views", "Retweets", "Comments"),
-    "TikTok": ("Followers", "Likes", "Views", "Comments"),
+    "Instagram": ("Instagram Followers", "Instagram Likes", "Instagram Views", "Instagram Comments", "Instagram Story Views", "Instagram Reels Views", "Instagram Saves", "Instagram Shares"),
+    "YouTube": ("YouTube Subscribers", "YouTube Likes", "YouTube Views", "YouTube Comments"),
+    "Telegram": ("Telegram Members", "Telegram Views", "Telegram Reactions", "Telegram Comments"),
+    "Facebook": ("Facebook Followers", "Facebook Likes", "Facebook Views", "Facebook Comments"),
+    "Twitter/X": ("Twitter Followers", "Twitter Likes", "Twitter Views", "Twitter Retweets", "Twitter Comments"),
+    "TikTok": ("TikTok Followers", "TikTok Likes", "TikTok Views", "TikTok Comments"),
 }
 
 PLATFORM_ALIASES = {
