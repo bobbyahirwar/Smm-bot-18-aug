@@ -45,8 +45,8 @@ wallet_ledger_collection.create_index(
 
 DEFAULT_CONFIG = {
     "bot_token":          os.getenv("BOT_TOKEN", ""),
-    "smm_panel_url":      "https://vcprovider.shop/api/v2",
-    "smm_api_key":        os.getenv("409c52e99fba11643c792a2cd581c023", ""),
+    "smm_panel_url":      "https://indiansmm.store/api/v2",
+    "smm_api_key":        os.getenv("9abc9233d182a83ddc1c12bff50d75b16e3fe449", ""),
 
     # Rates
     "provider_rate_reactions": 10,
