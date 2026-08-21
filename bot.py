@@ -1108,12 +1108,18 @@ def service_catalog_entry(message):
 @bot.callback_query_handler(func=lambda c: c.data == "svc_catalog_home")
 @safe_callback
 def service_catalog_home_callback(call):
-    bot.edit_message_text(
-        "🛍 <b>Order Services</b>\n\n📂 <b>Categories / Platforms</b>",
-        call.message.chat.id,
-        call.message.message_id,
-        reply_markup=service_catalog_home_markup()
-    )
+    text = "🛍 <b>Order Services</b>\n\n📂 <b>Categories / Platforms</b>"
+    try:
+        bot.edit_message_text(
+            text,
+            call.message.chat.id,
+            call.message.message_id,
+            reply_markup=service_catalog_home_markup()
+        )
+    except Exception as exc:
+        if "message is not modified" not in str(exc).lower():
+            raise
+        bot.answer_callback_query(call.id)
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("svc_catalog_home_page:"))
