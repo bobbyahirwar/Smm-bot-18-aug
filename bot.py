@@ -524,6 +524,17 @@ MAIN_COMMANDS = [
 # ─────────────────────────────────────────────────────────────
 #  HELPERS
 # ─────────────────────────────────────────────────────────────
+def _safe_float(value, default=0.0):
+    if value is None or value is False or value == "":
+        return default
+    if isinstance(value, bool):
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def is_admin(uid):
     return int(uid) in ADMIN_IDS
 
@@ -1770,17 +1781,6 @@ def _safe_int(value, default=None):
         return default
     try:
         return int(value)
-    except (TypeError, ValueError):
-        return default
-
-
-def _safe_float(value, default=0.0):
-    if value is None or value is False or value == "":
-        return default
-    if isinstance(value, bool):
-        return default
-    try:
-        return float(value)
     except (TypeError, ValueError):
         return default
 
