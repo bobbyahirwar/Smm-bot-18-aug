@@ -46,7 +46,7 @@ wallet_ledger_collection.create_index(
 DEFAULT_CONFIG = {
     "bot_token":          os.getenv("BOT_TOKEN", ""),
     "smm_panel_url":      "https://indiansmm.store/api/v2",
-    "smm_api_key":        os.getenv("9abc9233d182a83ddc1c12bff50d75b16e3fe449", ""),
+    "smm_api_key":        os.getenv("SMM_API_KEY", ""),
 
     # Rates
     "provider_rate_reactions": 10,
@@ -704,8 +704,15 @@ def safe_callback(func):
         try:
             return func(call, *args, **kwargs)
         except Exception as e:
-            print(f"[CALLBACK ERROR] {func.__name__}: {e}")
-            send_log(f"⚠️ <b>Bot error</b>\nCallback: <code>{func.__name__}</code>\nError type: <code>{type(e).__name__}</code>")
+            error_code = getattr(e, "error_code", None)
+            code_text = f" (code {error_code})" if error_code is not None else ""
+            error_details = f"{type(e).__name__}{code_text}: {e}"
+            print(f"[CALLBACK ERROR] {func.__name__}: {error_details}")
+            send_log(
+                f"⚠️ <b>Bot error</b>\n"
+                f"Callback: <code>{func.__name__}</code>\n"
+                f"Error: <code>{escape(error_details)}</code>"
+            )
             try:
                 bot.answer_callback_query(call.id, "❌ Something went wrong.")
             except Exception:
@@ -1129,8 +1136,11 @@ def service_catalog_home_callback(call):
         )
     except Exception as exc:
         if "message is not modified" not in str(exc).lower():
-            raise
+            raise RuntimeError(f"edit_message_text failed: {exc}") from exc
+    try:
         bot.answer_callback_query(call.id)
+    except Exception as exc:
+        raise RuntimeError(f"answer_callback_query failed: {exc}") from exc
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("svc_catalog_home_page:"))
@@ -1862,6 +1872,14 @@ def sync_provider_services():
     try:
         response = requests.post(base_url, data={"key": api_key, "action": "services"}, timeout=20)
         response.raise_for_status()
+    except requests.HTTPError as exc:
+        status_code = getattr(exc.response, "status_code", None) or getattr(response, "status_code", "unknown")
+        response_url = getattr(exc.response, "url", None) or getattr(response, "url", base_url)
+        return {
+            "ok": False,
+            "error": f"Provider rejected sync request (HTTP {status_code}) at {response_url}. "
+            "Check the provider API key and account access.",
+        }
     except requests.RequestException as exc:
         return {"ok": False, "error": f"Provider request failed: {exc}"}
 
