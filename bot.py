@@ -1664,6 +1664,7 @@ def curated_services_markup():
     mk = telebot.types.InlineKeyboardMarkup(row_width=2)
     mk.add(
         telebot.types.InlineKeyboardButton("➕ Add Service", callback_data="svc_admin_add"),
+        telebot.types.InlineKeyboardButton("📦 Bulk Configure", callback_data="svc_admin_bulk"),
         telebot.types.InlineKeyboardButton("📋 List Services", callback_data="ap_services"),
     )
     mk.add(
@@ -1679,6 +1680,35 @@ def curated_services_markup():
         telebot.types.InlineKeyboardButton("🔙 Back", callback_data="ap_back"),
     )
     return mk
+
+
+def admin_curated_platform_markup(mode):
+    markup = telebot.types.InlineKeyboardMarkup(row_width=2)
+    for platform in PLATFORM_ALIASES.values():
+        if platform not in [button.text for row in markup.keyboard for button in row]:
+            markup.add(telebot.types.InlineKeyboardButton(
+                format_service_platform(platform),
+                callback_data=f"svc_admin_platform:{mode}:{platform}"
+            ))
+    markup.add(telebot.types.InlineKeyboardButton("🔙 Back", callback_data="ap_curated_services"))
+    return markup
+
+
+def admin_curated_category_markup(mode, platform):
+    markup = telebot.types.InlineKeyboardMarkup(row_width=2)
+    for category in ALLOWED_USER_SERVICE_CATEGORIES.get(platform, ("General",)):
+        markup.add(telebot.types.InlineKeyboardButton(
+            category,
+            callback_data=f"svc_admin_category:{mode}:{platform}:{category}"
+        ))
+    markup.add(telebot.types.InlineKeyboardButton(
+        "🔙 Back", callback_data=f"svc_admin_platform_back:{mode}"
+    ))
+    if mode == "bulk":
+        markup.add(telebot.types.InlineKeyboardButton(
+            "✅ Done", callback_data="svc_admin_bulk_done"
+        ))
+    return markup
 
 
 def rates_markup():
@@ -2027,6 +2057,143 @@ def admin_callback(call):
         )
         return
 
+    if data in {"svc_admin_add", "svc_admin_bulk"}:
+        mode = "bulk" if data == "svc_admin_bulk" else "add"
+        bot.edit_message_text(
+            "📦 <b>Bulk Configure</b>\n\nSelect a platform:" if mode == "bulk"
+            else "➕ <b>Add Curated Service</b>\n\nSelect a platform:",
+            uid, call.message.message_id,
+            reply_markup=admin_curated_platform_markup(mode)
+        )
+        return
+
+    if data.startswith("svc_admin_platform:"):
+        try:
+            _, mode, platform = data.split(":", 2)
+        except ValueError:
+            bot.answer_callback_query(call.id, "❌ Invalid platform.")
+            return
+        if platform not in ALLOWED_USER_SERVICE_CATEGORIES:
+            bot.answer_callback_query(call.id, "❌ Unsupported platform.")
+            return
+        bot.edit_message_text(
+            f"{format_service_platform(platform)} <b>{escape(platform)}</b>\n\nSelect category/service type:",
+            uid, call.message.message_id,
+            reply_markup=admin_curated_category_markup(mode, platform)
+        )
+        return
+
+    if data.startswith("svc_admin_platform_back:"):
+        mode = data.split(":", 1)[1]
+        bot.edit_message_text(
+            "📦 <b>Bulk Configure</b>\n\nSelect a platform:" if mode == "bulk"
+            else "➕ <b>Add Curated Service</b>\n\nSelect a platform:",
+            uid, call.message.message_id,
+            reply_markup=admin_curated_platform_markup(mode)
+        )
+        return
+
+    if data == "svc_admin_bulk_done":
+        user_state.pop(uid, None)
+        bot.edit_message_text(
+            "✅ <b>Bulk configuration complete.</b>",
+            uid, call.message.message_id, reply_markup=curated_services_markup()
+        )
+        return
+
+    if data.startswith("svc_admin_category:"):
+        try:
+            _, mode, platform, category = data.split(":", 3)
+        except ValueError:
+            bot.answer_callback_query(call.id, "❌ Invalid category.")
+            return
+        if platform not in ALLOWED_USER_SERVICE_CATEGORIES or category not in ALLOWED_USER_SERVICE_CATEGORIES[platform]:
+            bot.answer_callback_query(call.id, "❌ Invalid category.")
+            return
+        user_state[uid] = {
+            "action": "admin_service_wizard",
+            "mode": mode,
+            "step": "display_name",
+            "platform": platform,
+            "category": category,
+        }
+        mk = telebot.types.InlineKeyboardMarkup()
+        mk.add(telebot.types.InlineKeyboardButton(
+            "❌ Cancel", callback_data="ap_curated_services"
+        ))
+        bot.edit_message_text(
+            f"{format_service_platform(platform)} <b>{escape(category)}</b>\n\n"
+            "Enter the customer display name:",
+            uid, call.message.message_id, reply_markup=mk
+        )
+        bot.register_next_step_handler(call.message, process_admin_service_wizard)
+        return
+
+    if data.startswith("svc_admin_wizard_enabled:"):
+        enabled = data.rsplit(":", 1)[1] == "yes"
+        state = user_state.get(uid)
+        if not state or state.get("action") != "admin_service_wizard" or state.get("step") != "enabled":
+            bot.answer_callback_query(call.id, "❌ Setup session expired.")
+            return
+        state["enabled"] = enabled
+        state["step"] = "save"
+        markup = telebot.types.InlineKeyboardMarkup(row_width=2)
+        markup.add(
+            telebot.types.InlineKeyboardButton("✅ Save", callback_data="svc_admin_wizard_save"),
+            telebot.types.InlineKeyboardButton("❌ Cancel", callback_data="ap_curated_services"),
+        )
+        bot.edit_message_text(
+            f"📋 <b>Review Curated Service</b>\n\n"
+            f"Platform: <b>{escape(state['platform'])}</b>\n"
+            f"Category: <b>{escape(state['category'])}</b>\n"
+            f"Display name: <b>{escape(state['display_name'])}</b>\n"
+            f"Provider Service ID: <code>{state['provider_service_id']}</code>\n"
+            f"Selling Price: <b>₹{format_selling_price(state['selling_price'])}/1K</b>\n"
+            f"Status: <b>{'ON' if enabled else 'OFF'}</b>",
+            uid, call.message.message_id, reply_markup=markup
+        )
+        return
+
+    if data == "svc_admin_wizard_save":
+        state = user_state.get(uid)
+        if not state or state.get("action") != "admin_service_wizard" or state.get("step") != "save":
+            bot.answer_callback_query(call.id, "❌ Setup session expired.")
+            return
+        service_data = {
+            "_id": uuid4().hex,
+            "name": state["display_name"],
+            "platform": state["platform"],
+            "display_name": state["display_name"],
+            "provider_service_id": state["provider_service_id"],
+            "category": state["category"],
+            "min": 1,
+            "max": 2147483647,
+            "selling_price": state["selling_price"],
+            "enabled": state["enabled"],
+            "curated": True,
+        }
+        services_collection.insert_one(service_data)
+        if state.get("mode") == "bulk":
+            state.clear()
+            state.update({
+                "action": "admin_service_bulk",
+                "mode": "bulk",
+                "platform": service_data["platform"],
+            })
+            bot.edit_message_text(
+                f"✅ <b>{escape(service_data['display_name'])}</b> saved.\n\n"
+                f"Add another curated service for {escape(service_data['platform'])}:",
+                uid, call.message.message_id,
+                reply_markup=admin_curated_category_markup("bulk", service_data["platform"])
+            )
+        else:
+            user_state.pop(uid, None)
+            bot.edit_message_text(
+                f"✅ Curated service <b>{escape(service_data['display_name'])}</b> saved.",
+                uid, call.message.message_id, reply_markup=curated_services_markup()
+            )
+        return
+
     if data == "ap_curated_service_ids":
         user_state[uid] = {"action": "admin_service_id_search"}
         mk = telebot.types.InlineKeyboardMarkup()
@@ -2071,16 +2238,6 @@ def admin_callback(call):
             uid, call.message.message_id, reply_markup=mk
         )
         bot.register_next_step_handler(call.message, process_admin_service_price_input)
-        return
-
-    if data == "svc_admin_add":
-        user_state[uid] = {"action": "admin_service_add"}
-        mk = telebot.types.InlineKeyboardMarkup()
-        mk.add(telebot.types.InlineKeyboardButton("❌ Cancel", callback_data="ap_services"))
-        bot.edit_message_text(
-            service_editor_prompt(), uid, call.message.message_id, reply_markup=mk
-        )
-        bot.register_next_step_handler(call.message, process_admin_service_input)
         return
 
     if data.startswith("svc_admin_edit:"):
@@ -2942,6 +3099,53 @@ def process_admin_service_input(message):
         f"✅ Service <b>{escape(parts[1])}</b> {result}.",
         reply_markup=admin_panel_markup()
     )
+
+
+@safe_handler
+def process_admin_service_wizard(message):
+    uid = message.chat.id
+    state = user_state.get(uid)
+    if not state or state.get("action") != "admin_service_wizard":
+        return
+    if not is_admin(uid) or message.content_type != "text":
+        bot.send_message(uid, "❌ Send text only.", reply_markup=curated_services_markup())
+        return
+
+    value = message.text.strip()
+    if not value:
+        bot.send_message(uid, "❌ This field cannot be empty.")
+        bot.register_next_step_handler(message, process_admin_service_wizard)
+        return
+
+    if state["step"] == "display_name":
+        state["display_name"] = value
+        state["step"] = "provider_service_id"
+        bot.send_message(uid, "Enter the Provider Service ID (integer only):")
+    elif state["step"] == "provider_service_id":
+        if not value.isdigit() or int(value) <= 0:
+            bot.send_message(uid, "❌ Provider Service ID must be a positive whole number.")
+        else:
+            state["provider_service_id"] = int(value)
+            state["step"] = "selling_price"
+            bot.send_message(uid, "Enter the customer selling price per 1K:")
+    elif state["step"] == "selling_price":
+        try:
+            price = float(value)
+            if price <= 0:
+                raise ValueError
+        except ValueError:
+            bot.send_message(uid, "❌ Selling price must be a positive number.")
+        else:
+            state["selling_price"] = price
+            state["step"] = "enabled"
+            markup = telebot.types.InlineKeyboardMarkup(row_width=2)
+            markup.add(
+                telebot.types.InlineKeyboardButton("🟢 Enable", callback_data="svc_admin_wizard_enabled:yes"),
+                telebot.types.InlineKeyboardButton("⚪ Disable", callback_data="svc_admin_wizard_enabled:no"),
+            )
+            bot.send_message(uid, "Set curated service status:", reply_markup=markup)
+            return
+    bot.register_next_step_handler(message, process_admin_service_wizard)
 
 
 @safe_handler
