@@ -113,32 +113,41 @@ DEFAULT_SERVICES = [
     {
         "_id": "reactions",
         "name": "👍 Order Reactions",
+        "display_name": "Instagram Reactions",
+        "platform": "Instagram",
         "provider_service_id": 476,
         "category": "Reactions",
         "min": 10,
         "max": 2147483647,
         "price": 10,
         "enabled": True,
+        "curated": True,
     },
     {
         "_id": "views",
         "name": "👀 Order Views",
+        "display_name": "Instagram Views",
+        "platform": "Instagram",
         "provider_service_id": 500,
         "category": "Views",
         "min": 10,
         "max": 2147483647,
         "price": 100,
         "enabled": True,
+        "curated": True,
     },
     {
         "_id": "members",
         "name": "👥 Order Members",
+        "display_name": "Telegram Members",
+        "platform": "Telegram",
         "provider_service_id": 470,
         "category": "Members",
         "min": 10,
         "max": 2147483647,
         "price": 1,
         "enabled": True,
+        "curated": True,
     },
 ]
 
@@ -161,6 +170,20 @@ def ensure_default_services():
 
 
 ensure_default_services()
+
+for legacy_id, display_name, platform, default_price in (
+    ("reactions", "Instagram Reactions", "Instagram", cfg["provider_rate_reactions"]),
+    ("views", "Instagram Views", "Instagram", cfg["provider_rate_views"]),
+    ("members", "Telegram Members", "Telegram", cfg["provider_rate_members"]),
+):
+    services_collection.update_one(
+        {"_id": legacy_id},
+        {"$set": {"curated": True, "display_name": display_name, "platform": platform}},
+    )
+    services_collection.update_one(
+        {"_id": legacy_id, "selling_price": {"$exists": False}},
+        {"$set": {"selling_price": float(default_price)}},
+    )
 
 # ─────────────────────────────────────────────────────────────
 #  BOT INIT
@@ -540,7 +563,7 @@ def is_admin(uid):
 
 
 def get_enabled_services():
-    return list(services_collection.find({"enabled": True}).sort([("category", 1), ("name", 1)]))
+    return list(services_collection.find({"enabled": True, "curated": True}).sort([("category", 1), ("display_name", 1)]))
 
 
 def get_provider_rate(service):
@@ -562,6 +585,8 @@ def calculate_default_selling_price(provider_rate):
 
 
 def get_selling_rate(service):
+    if service.get("curated"):
+        return _safe_float(service.get("selling_price"), 0.0)
     override = _safe_float(service.get("selling_price"), 0.0)
     if override > 0:
         return override
@@ -597,7 +622,9 @@ def get_order_charge(service, quantity):
 def get_enabled_service_by_name(name):
     if not name:
         return None
-    return services_collection.find_one({"name": name, "enabled": True})
+    return services_collection.find_one({
+        "display_name": name, "enabled": True, "curated": True
+    })
 
 
 def get_service_by_id(service_id, enabled_only=False):
@@ -860,12 +887,12 @@ def format_service_platform(platform):
 
 
 ALLOWED_USER_SERVICE_CATEGORIES = {
-    "Instagram": ("Instagram Followers", "Instagram Likes", "Instagram Views", "Instagram Comments", "Instagram Story Views", "Instagram Reels Views", "Instagram Saves", "Instagram Shares"),
-    "YouTube": ("YouTube Subscribers", "YouTube Likes", "YouTube Views", "YouTube Comments"),
-    "Telegram": ("Telegram Members", "Telegram Views", "Telegram Reactions", "Telegram Comments"),
-    "Facebook": ("Facebook Followers", "Facebook Likes", "Facebook Views", "Facebook Comments"),
-    "Twitter/X": ("Twitter Followers", "Twitter Likes", "Twitter Views", "Twitter Retweets", "Twitter Comments"),
-    "TikTok": ("TikTok Followers", "TikTok Likes", "TikTok Views", "TikTok Comments"),
+    "Instagram": ("Followers", "Likes", "Views", "Comments", "Story Views", "Reels Views", "Saves", "Shares"),
+    "YouTube": ("Subscribers", "Likes", "Views", "Comments"),
+    "Telegram": ("Members", "Views", "Reactions", "Comments"),
+    "Facebook": ("Followers", "Likes", "Views", "Comments"),
+    "Twitter/X": ("Followers", "Likes", "Views", "Retweets", "Comments"),
+    "TikTok": ("Followers", "Likes", "Views", "Comments"),
 }
 
 PLATFORM_ALIASES = {
@@ -916,13 +943,13 @@ def find_service_type(text):
     return None
 
 def get_user_catalog_service_parts(service):
-    """Return normalized catalog parts from provider platform, category, and name."""
+    """Return catalog parts only for explicitly curated services."""
+    if not service or not service.get("curated"):
+        return None
     raw_platform = str(service.get("platform") or "")
     raw_category = str(service.get("category") or "")
-    raw_name = str(service.get("name") or "")
+    raw_name = str(service.get("display_name") or "")
     platform = find_platform(raw_platform)
-    if not platform:
-        platform = find_platform(f"{raw_category} {raw_name}")
     if not platform:
         return None
 
@@ -937,7 +964,9 @@ def is_user_catalog_service(service):
 
 
 def get_enabled_services_by_platform_category():
-    services = list(services_collection.find({"enabled": True}).sort([("category", 1), ("name", 1)]))
+    services = list(services_collection.find({
+        "enabled": True, "curated": True
+    }).sort([("category", 1), ("display_name", 1)]))
     grouped = {}
     for service in services:
         parts = get_user_catalog_service_parts(service)
@@ -1058,7 +1087,7 @@ def service_catalog_category_markup(platform, category, page=0, page_size=6):
     category_id = categories.index(category)
     for service in services[start:end]:
         markup.add(telebot.types.InlineKeyboardButton(
-            f"{service['name']} — ₹{get_selling_rate(service):.2f}/1K",
+            f"{service['display_name']} — ₹{get_selling_rate(service):.2f}/1K",
             callback_data=f"svc_catalog_service:{service['_id']}"
         ))
 
@@ -1116,6 +1145,28 @@ def send_service_catalog_home(message):
     bot.send_message(message.chat.id, text, reply_markup=service_catalog_home_markup())
 
 
+def edit_catalog_message(text, message, reply_markup=None):
+    """Edit text messages safely; send a catalog message for media callbacks."""
+    try:
+        if getattr(message, "content_type", None) == "text" or getattr(message, "text", None):
+            bot.edit_message_text(
+                text, message.chat.id, message.message_id,
+                reply_markup=reply_markup,
+            )
+        elif getattr(message, "caption", None):
+            bot.edit_message_caption(
+                text, message.chat.id, message.message_id,
+                reply_markup=reply_markup,
+            )
+        else:
+            bot.send_message(message.chat.id, text, reply_markup=reply_markup)
+    except Exception as exc:
+        lowered = str(exc).lower()
+        if "message is not modified" in lowered or "there is no text in the message to edit" in lowered:
+            return
+        raise
+
+
 @bot.message_handler(func=lambda m: m.text == "🛍 Services")
 @safe_handler
 @require_not_banned
@@ -1127,16 +1178,7 @@ def service_catalog_entry(message):
 @safe_callback
 def service_catalog_home_callback(call):
     text = "🛍 <b>Order Services</b>\n\n📂 <b>Categories / Platforms</b>"
-    try:
-        bot.edit_message_text(
-            text,
-            call.message.chat.id,
-            call.message.message_id,
-            reply_markup=service_catalog_home_markup()
-        )
-    except Exception as exc:
-        if "message is not modified" not in str(exc).lower():
-            raise RuntimeError(f"edit_message_text failed: {exc}") from exc
+    edit_catalog_message(text, call.message, service_catalog_home_markup())
     try:
         bot.answer_callback_query(call.id)
     except Exception as exc:
@@ -1150,10 +1192,9 @@ def service_catalog_home_page_callback(call):
         page = int(call.data.split(":", 1)[1])
     except (TypeError, ValueError):
         page = 0
-    bot.edit_message_text(
+    edit_catalog_message(
         "🛍 <b>Order Services</b>\n\n📂 <b>Categories / Platforms</b>",
-        call.message.chat.id,
-        call.message.message_id,
+        call.message,
         reply_markup=service_catalog_home_markup(page=page)
     )
 
@@ -1178,10 +1219,9 @@ def service_catalog_platform_callback(call):
         bot.answer_callback_query(call.id, "❌ No categories in this platform.")
         return
 
-    bot.edit_message_text(
+    edit_catalog_message(
         f"📂 <b>{escape(platform)}</b>\n\nSelect a category:",
-        call.message.chat.id,
-        call.message.message_id,
+        call.message,
         reply_markup=service_catalog_platform_markup(platform)
     )
 
@@ -1201,10 +1241,9 @@ def service_catalog_platform_page_callback(call):
         bot.answer_callback_query(call.id, "❌ Invalid platform.")
         return
 
-    bot.edit_message_text(
+    edit_catalog_message(
         f"📂 <b>{escape(platform)}</b>\n\nSelect a category:",
-        call.message.chat.id,
-        call.message.message_id,
+        call.message,
         reply_markup=service_catalog_platform_markup(platform, page=page)
     )
 
@@ -1230,10 +1269,9 @@ def service_catalog_category_callback(call):
         return
 
     text = f"📂 <b>{escape(platform)}</b>\n📁 <b>{escape(category)}</b>\n\nSelect a service:"
-    bot.edit_message_text(
+    edit_catalog_message(
         text,
-        call.message.chat.id,
-        call.message.message_id,
+        call.message,
         reply_markup=service_catalog_category_markup(platform, category)
     )
 
@@ -1259,10 +1297,9 @@ def service_catalog_category_page_callback(call):
         bot.answer_callback_query(call.id, "❌ No services in this category.")
         return
     text = f"📂 <b>{escape(platform)}</b>\n📁 <b>{escape(category)}</b>\n\nSelect a service:"
-    bot.edit_message_text(
+    edit_catalog_message(
         text,
-        call.message.chat.id,
-        call.message.message_id,
+        call.message,
         reply_markup=service_catalog_category_markup(platform, category, page=page)
     )
 
@@ -1284,21 +1321,15 @@ def service_catalog_service_callback(call):
 
     platform, category = get_user_catalog_service_parts(service)
     lines = [
-        f"📦 <b>{escape(str(service['name']))}</b>",
+        f"📦 <b>{escape(str(service['display_name']))}</b>",
         f"Category: <b>{escape(category)}</b>",
         f"Min: <b>{service.get('min', 'N/A')}</b>",
         f"Max: <b>{service.get('max', 'N/A')}</b>",
         f"💰 Price: <b>₹{get_selling_rate(service):.2f}</b> / 1000",
     ]
-    description = str(service.get("description") or "").strip()
-    if description:
-        lines.append("")
-        lines.append(f"Description: <i>{escape(description)}</i>")
-
-    bot.edit_message_text(
+    edit_catalog_message(
         "\n".join(lines),
-        call.message.chat.id,
-        call.message.message_id,
+        call.message,
         reply_markup=service_catalog_details_markup(service_id, platform, category)
     )
 
@@ -1316,7 +1347,7 @@ def service_catalog_order_now_callback(call):
     user_state[user_id] = {
         "action": "catalog_order",
         "service_id": service_id,
-        "service_name": service["name"],
+        "service_name": service["display_name"],
         "service_min": service["min"],
         "service_max": service["max"],
         "selling_rate": get_selling_rate(service),
@@ -1327,7 +1358,7 @@ def service_catalog_order_now_callback(call):
     bot.answer_callback_query(call.id)
     bot.send_message(
         user_id,
-        f"📦 <b>{escape(str(service['name']))}</b>\n\nSend the required link or username for this order:"
+        f"📦 <b>{escape(str(service['display_name']))}</b>\n\nSend the required link or username for this order:"
     )
 
 
@@ -1394,7 +1425,7 @@ def handle_catalog_order(message):
         bot.send_message(
             user_id,
             "🧾 <b>Order Summary</b>\n\n"
-            f"Service: <b>{escape(str(service['name']))}</b>\n"
+            f"Service: <b>{escape(str(service['display_name']))}</b>\n"
             f"Link/Username: <code>{escape(str(state['link']))}</code>\n"
             f"Quantity: <b>{quantity}</b>\n"
             f"Current price: <b>₹{current_price:.2f}</b>\n\n"
@@ -1459,7 +1490,7 @@ def service_catalog_confirm_order_callback(call):
 
     state["action"] = "order"
     state["service_id"] = service["_id"]
-    state["service_name"] = service["name"]
+    state["service_name"] = service["display_name"]
     state["service_min"] = service["min"]
     state["service_max"] = service["max"]
     state["selling_rate"] = get_selling_rate(service)
@@ -1608,7 +1639,7 @@ def place_order_for_user(user_id, state, service, url, quantity):
         send_log(
             f"❌ <b>Order failed</b>\n"
             f"User ID: <code>{user_id}</code>\n"
-            f"Service: <b>{escape(str(service['name']))}</b>\n"
+            f"Service: <b>{escape(str(service['display_name']))}</b>\n"
             f"Quantity: {quantity}\n"
             f"Charged: ₹{charged_amount:.2f}\n"
             f"Status: failed"
@@ -1632,8 +1663,8 @@ def place_order_for_user(user_id, state, service, url, quantity):
         ts       = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         order_details = {
             "order_id":    order_id,
-            "service_type": service["name"],
-            "service_name": service["name"],
+            "service_type": service["display_name"],
+            "service_name": service["display_name"],
             "reservation_id": reservation_id,
             "link":        url,
             "quantity":    quantity,
@@ -1648,14 +1679,14 @@ def place_order_for_user(user_id, state, service, url, quantity):
             f"🛒 <b>Order placed</b>\n"
             f"User ID: <code>{user_id}</code>\n"
             f"Order ID: <code>{order_id}</code>\n"
-            f"Service: <b>{escape(str(service['name']))}</b>\n"
+            f"Service: <b>{escape(str(service['display_name']))}</b>\n"
             f"Quantity: {quantity}\n"
             f"Charged: ₹{charged_amount:.2f}\n"
             f"Status: placed"
         )
         bot.send_message(user_id,
             f"✅ 𝗢𝗥𝗗𝗘𝗥 𝗣𝗟𝗔𝗖𝗘𝗗 🦋\n"
-            f"Service: {service['name']}\n"
+            f"Service: {service['display_name']}\n"
             f"Quantity: {quantity}\n"
             f"Order ID: <code>{order_id}</code>\n"
             f"Estimated time: 2-3 hours"
@@ -1915,7 +1946,8 @@ def sync_provider_services():
                     else calculate_default_selling_price(service["provider_rate"])
                 )
             ),
-            "enabled": existing.get("enabled", True) if existing else True,
+            "enabled": existing.get("enabled", False) if existing else False,
+            "curated": existing.get("curated", False) if existing else False,
         }
         if existing:
             services_collection.update_one(
@@ -1933,11 +1965,11 @@ def sync_provider_services():
 
 def services_admin_markup():
     mk = telebot.types.InlineKeyboardMarkup(row_width=1)
-    services = list(services_collection.find({}).sort([("category", 1), ("name", 1)]))
+    services = list(services_collection.find({"curated": True}).sort([("platform", 1), ("display_name", 1)]))
     for service in services:
         status = "✅" if service.get("enabled") else "⛔"
         mk.add(telebot.types.InlineKeyboardButton(
-            f"{status} {service['name']}",
+            f"{status} {service['display_name']}",
             callback_data=f"svc_admin_edit:{service['_id']}"
         ))
     mk.add(telebot.types.InlineKeyboardButton("🔄 Sync Services", callback_data="ap_sync_services"))
@@ -1949,21 +1981,21 @@ def services_admin_markup():
 def services_admin_text():
     return (
         "🧰 <b>Manage Services</b>\n\n"
-        "Only enabled services appear in the user menu and search.\n"
-        "Select a service to edit or enable/disable it."
+        "Only curated services can appear in the user menu.\n"
+        "Select a service to edit, enable/disable, or remove it."
     )
 
 
 def service_editor_prompt(service=None):
-    example = "Name | Provider ID | Category | Min | Max | Provider Rate | Selling Rate | Enabled"
+    example = "Platform | Display Name | Provider ID | Category | Min | Max | Selling Price | Enabled"
     if service:
         values = " | ".join([
-            str(service["name"]),
+            str(service["platform"]),
+            str(service["display_name"]),
             str(service["provider_service_id"]),
             str(service["category"]),
             str(service["min"]),
             str(service["max"]),
-            f"₹{get_provider_rate(service):.2f}",
             f"₹{get_selling_rate(service):.2f}",
             "yes" if service.get("enabled") else "no",
         ])
@@ -1975,7 +2007,7 @@ def service_editor_prompt(service=None):
     return (
         "➕ <b>Add Service</b>\n\n"
         f"Send all fields in this format:\n<code>{escape(example)}</code>\n\n"
-        "Provider rate is the provider's cost per 1000. Selling rate is the customer price per 1000."
+        "Selling price is the customer price per 1000. Provider details are internal only."
     )
 
 
@@ -2082,7 +2114,7 @@ def admin_callback(call):
             "❌ Cancel", callback_data="ap_service_prices"
         ))
         bot.edit_message_text(
-            f"💰 <b>{escape(str(service['name']))}</b>\n\n"
+            f"💰 <b>{escape(str(service['display_name']))}</b>\n\n"
             f"Provider service ID: <code>{service['provider_service_id']}</code>\n"
             f"Current selling price: <b>₹{format_selling_price(current_price)}/1K</b>\n\n"
             "Send the new customer selling price per 1000:",
@@ -2117,9 +2149,12 @@ def admin_callback(call):
                 "✏️ Edit Fields", callback_data=f"svc_admin_fields:{service_id}"
             ),
         )
+        mk.add(telebot.types.InlineKeyboardButton(
+            "🗑 Delete Service", callback_data=f"svc_admin_delete:{service_id}"
+        ))
         mk.add(telebot.types.InlineKeyboardButton("🔙 Back", callback_data="ap_services"))
         bot.edit_message_text(
-            f"🧰 <b>{escape(str(service['name']))}</b>\n\n"
+            f"🧰 <b>{escape(str(service.get('display_name', service.get('name'))))}</b>\n\n"
             f"Provider ID: <code>{service['provider_service_id']}</code>\n"
             f"Category: <b>{escape(str(service['category']))}</b>\n"
             f"Min / Max: <b>{service['min']} / {service['max']}</b>\n"
@@ -2127,6 +2162,19 @@ def admin_callback(call):
             f"Selling rate: <b>₹{get_selling_rate(service):.2f}</b> / 1000\n"
             f"Status: <b>{'Enabled' if service.get('enabled') else 'Disabled'}</b>",
             uid, call.message.message_id, reply_markup=mk
+        )
+        return
+
+    if data.startswith("svc_admin_delete:"):
+        service_id = data.split(":", 1)[1]
+        service = get_service_by_id(service_id)
+        if not service or not service.get("curated"):
+            bot.answer_callback_query(call.id, "Curated service not found.")
+            return
+        services_collection.delete_one({"_id": service_id, "curated": True})
+        bot.edit_message_text(
+            f"✅ Curated service <b>{escape(str(service.get('display_name')))}</b> removed.",
+            uid, call.message.message_id, reply_markup=services_admin_markup()
         )
         return
 
@@ -2782,12 +2830,12 @@ def process_admin_service_price_search(message):
 
     query_lower = query.lower()
     services = []
-    for service in services_collection.find({"enabled": True}).sort([("category", 1), ("name", 1)]):
+    for service in services_collection.find({"enabled": True, "curated": True}).sort([("category", 1), ("display_name", 1)]):
         if not is_user_catalog_service(service):
             continue
         platform, category = get_user_catalog_service_parts(service)
         searchable = " ".join([
-            str(service.get("name") or ""),
+            str(service.get("display_name") or ""),
             str(service.get("category") or ""),
             str(service.get("provider_service_id") or ""),
             platform,
@@ -2804,7 +2852,7 @@ def process_admin_service_price_search(message):
     for service in services:
         platform, _ = get_user_catalog_service_parts(service)
         markup.add(telebot.types.InlineKeyboardButton(
-            f"{format_service_platform(platform)} {service['name']} — "
+            f"{format_service_platform(platform)} {service['display_name']} — "
             f"₹{format_selling_price(get_selling_rate(service))}/1K",
             callback_data=f"svc_price_select:{service['_id']}"
         ))
@@ -2836,7 +2884,7 @@ def process_admin_service_price_input(message):
     )
     bot.send_message(
         uid,
-        f"✅ <b>{escape(str(service['name']))}</b> selling price updated to "
+        f"✅ <b>{escape(str(service['display_name']))}</b> selling price updated to "
         f"<b>₹{format_selling_price(price)}/1K</b>.",
         reply_markup=admin_panel_markup()
     )
@@ -2855,11 +2903,11 @@ def process_admin_service_input(message):
         return
 
     parts = [part.strip() for part in message.text.split("|")]
-    if len(parts) != 8 or any(not part for part in parts[:3]):
+    if len(parts) != 8 or any(not part for part in parts[:4]):
         bot.send_message(
             uid,
             "❌ Invalid format. Use:\n"
-            "<code>Name | Provider ID | Category | Min | Max | Provider Rate | Selling Rate | Enabled</code>",
+            "<code>Platform | Display Name | Provider ID | Category | Min | Max | Selling Price | Enabled</code>",
             reply_markup=admin_panel_markup()
         )
         return
@@ -2867,35 +2915,37 @@ def process_admin_service_input(message):
     enabled_values = {"1": True, "yes": True, "true": True, "on": True,
                       "0": False, "no": False, "false": False, "off": False}
     try:
-        provider_service_id = int(parts[1])
-        minimum = int(parts[3])
-        maximum = int(parts[4])
-        provider_rate = float(parts[5])
+        platform = find_platform(parts[0])
+        provider_service_id = int(parts[2])
+        minimum = int(parts[4])
+        maximum = int(parts[5])
         selling_rate = float(parts[6])
         enabled_key = parts[7].lower()
         if (
-            provider_service_id <= 0 or minimum < 1 or maximum < minimum or
-            provider_rate <= 0 or selling_rate <= 0 or enabled_key not in enabled_values
+            not platform or provider_service_id <= 0 or minimum < 1 or maximum < minimum or
+            selling_rate <= 0 or enabled_key not in enabled_values
         ):
             raise ValueError
     except ValueError:
         bot.send_message(
             uid,
-            "❌ Invalid numeric range or enabled value. "
-            "Use positive Provider ID/Min/rates, Max ≥ Min, and yes/no for Enabled.",
+            "❌ Invalid platform, numeric range, or enabled value. "
+            "Use Platform | Display Name | Provider ID | Category | Min | Max | Selling Price | Enabled.",
             reply_markup=admin_panel_markup()
         )
         return
 
     service_data = {
-        "name": parts[0],
+        "name": parts[1],
+        "platform": platform,
+        "display_name": parts[1],
         "provider_service_id": provider_service_id,
-        "category": parts[2],
+        "category": parts[3],
         "min": minimum,
         "max": maximum,
-        "provider_rate": provider_rate,
         "selling_price": selling_rate,
         "enabled": enabled_values[enabled_key],
+        "curated": True,
     }
     if state["action"] == "admin_service_edit":
         services_collection.update_one(
@@ -2909,7 +2959,7 @@ def process_admin_service_input(message):
 
     bot.send_message(
         uid,
-        f"✅ Service <b>{escape(parts[0])}</b> {result}.",
+        f"✅ Service <b>{escape(parts[1])}</b> {result}.",
         reply_markup=admin_panel_markup()
     )
 
@@ -3124,7 +3174,7 @@ def start_order(message, service):
     user_state[user_id] = {
         "action": "order",
         "service_id": service["_id"],
-        "service_name": service["name"],
+        "service_name": service["display_name"],
         "service_min": service["min"],
         "service_max": service["max"],
         "selling_rate": get_selling_rate(service),
@@ -3132,7 +3182,7 @@ def start_order(message, service):
         "url": None
     }
     bot.send_message(user_id,
-        f"𝗦𝗘𝗡𝗗 𝗬𝗢𝗨𝗥 𝗧𝗘𝗟𝗘𝗚𝗥𝗔𝗠 𝗟𝗜𝗡𝗞 𝗙𝗢𝗥 {service['name']}:\n"
+        f"𝗦𝗘𝗡𝗗 𝗬𝗢𝗨𝗥 𝗧𝗘𝗟𝗘𝗚𝗥𝗔𝗠 𝗟𝗜𝗡𝗞 𝗙𝗢𝗥 {service['display_name']}:\n"
         f"(Selling rate: ₹{get_selling_rate(service):.2f} per 1000 {service['category']})"
     )
 
@@ -3173,8 +3223,9 @@ def process_service_search(message):
     matcher = {"$regex": re.escape(query), "$options": "i"}
     services = list(services_collection.find({
         "enabled": True,
-        "$or": [{"name": matcher}, {"category": matcher}]
-    }).sort([("category", 1), ("name", 1)]))
+        "curated": True,
+        "$or": [{"display_name": matcher}, {"category": matcher}, {"platform": matcher}]
+    }).sort([("category", 1), ("display_name", 1)]))
     services = [service for service in services if is_user_catalog_service(service)][:20]
     if not services:
         bot.send_message(user_id, "❌ No enabled services matched your search.")
@@ -3183,7 +3234,7 @@ def process_service_search(message):
     markup = telebot.types.InlineKeyboardMarkup(row_width=1)
     for service in services:
         markup.add(telebot.types.InlineKeyboardButton(
-            service["name"], callback_data=f"svc_order:{service['_id']}"
+            service["display_name"], callback_data=f"svc_order:{service['_id']}"
         ))
     bot.send_message(user_id, "🔎 <b>Enabled services found:</b>", reply_markup=markup)
 
@@ -3402,7 +3453,7 @@ def process_order_quantity(message):
         send_log(
             f"❌ <b>Order failed</b>\n"
             f"User ID: <code>{user_id}</code>\n"
-            f"Service: <b>{escape(str(service['name']))}</b>\n"
+            f"Service: <b>{escape(str(service['display_name']))}</b>\n"
             f"Quantity: {quantity}\n"
             f"Charged: ₹{charged_amount:.2f}\n"
             f"Status: failed"
@@ -3426,8 +3477,8 @@ def process_order_quantity(message):
         ts       = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         order_details = {
             "order_id":    order_id,
-            "service_type": service["name"],
-            "service_name": service["name"],
+            "service_type": service["display_name"],
+            "service_name": service["display_name"],
             "reservation_id": reservation_id,
             "link":        url,
             "quantity":    quantity,
@@ -3442,7 +3493,7 @@ def process_order_quantity(message):
             f"🛒 <b>Order placed</b>\n"
             f"User ID: <code>{user_id}</code>\n"
             f"Order ID: <code>{order_id}</code>\n"
-            f"Service: <b>{escape(str(service['name']))}</b>\n"
+            f"Service: <b>{escape(str(service['display_name']))}</b>\n"
             f"Quantity: {quantity}\n"
             f"Charged: ₹{charged_amount:.2f}\n"
             f"Status: placed"
@@ -3450,7 +3501,7 @@ def process_order_quantity(message):
 
         bot.send_message(user_id,
             f"✅ 𝗢𝗥𝗗𝗘𝗥 𝗣𝗟𝗔𝗖𝗘𝗗 🦋\n"
-            f"Service: {service['name']}\n"
+            f"Service: {service['display_name']}\n"
             f"Quantity: {quantity}\n"
             f"Order ID: <code>{order_id}</code>\n"
             f"Estimated time: 2-3 hours"
@@ -3460,7 +3511,7 @@ def process_order_quantity(message):
         admin_text = (
             f"🛒 <b>NEW ORDER</b>\n"
             f"👤 User: <a href='tg://user?id={user_id}'>{user_id}</a>\n"
-            f"🔧 Service: {service['name']}\n"
+            f"🔧 Service: {service['display_name']}\n"
             f"🔗 Link: {url}\n"
             f"📦 Qty: {quantity}\n"
             f"🆔 Order ID: {order_id}\n"
@@ -3701,7 +3752,9 @@ def get_order_amount_for_display(order):
         return "N/A"
 
     service_name = order.get("service_name") or order.get("service_type")
-    service = services_collection.find_one({"name": service_name}) if service_name else None
+    service = services_collection.find_one({
+        "$or": [{"display_name": service_name}, {"name": service_name}]
+    }) if service_name else None
     if not service:
         return "N/A"
     selling_rate = get_selling_rate(service)
