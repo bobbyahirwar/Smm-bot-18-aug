@@ -943,7 +943,7 @@ def find_service_type(text):
     return None
 
 def get_user_catalog_service_parts(service):
-    """Return catalog parts only for explicitly curated services."""
+    """Return normalized platform/category data for explicitly curated services."""
     if not service or not service.get("curated"):
         return None
     raw_platform = str(service.get("platform") or "")
@@ -954,31 +954,29 @@ def get_user_catalog_service_parts(service):
         return None
 
     category = find_service_type(f"{raw_category} {raw_name}")
-    if category not in ALLOWED_USER_SERVICE_CATEGORIES[platform]:
-        return None
-    return platform, category
+    return platform, category or "General"
 
 
 def is_user_catalog_service(service):
     return bool(service and service.get("enabled") and get_user_catalog_service_parts(service))
 
 
-def get_enabled_services_by_platform_category():
+def get_enabled_services_by_platform():
     services = list(services_collection.find({
         "enabled": True, "curated": True
-    }).sort([("category", 1), ("display_name", 1)]))
+    }).sort([("platform", 1), ("display_name", 1)]))
     grouped = {}
     for service in services:
         parts = get_user_catalog_service_parts(service)
         if not parts:
             continue
-        platform, category = parts
-        grouped.setdefault(platform, {}).setdefault(category, []).append(service)
+        platform, _ = parts
+        grouped.setdefault(platform, []).append(service)
     return grouped
 
 
 def get_platform_name_from_id(platform_id):
-    platforms = sorted(get_enabled_services_by_platform_category(), key=lambda text: text.lower())
+    platforms = sorted(get_enabled_services_by_platform(), key=lambda text: text.lower())
     try:
         platform_id = int(platform_id)
     except (TypeError, ValueError):
@@ -988,22 +986,8 @@ def get_platform_name_from_id(platform_id):
     return None
 
 
-def get_category_name_from_id(platform, category_id):
-    categories = sorted(
-        get_enabled_services_by_platform_category().get(platform, {}),
-        key=lambda text: text.lower()
-    )
-    try:
-        category_id = int(category_id)
-    except (TypeError, ValueError):
-        return None
-    if 0 <= category_id < len(categories):
-        return categories[category_id]
-    return None
-
-
 def service_catalog_home_markup(page=0, page_size=6):
-    grouped = get_enabled_services_by_platform_category()
+    grouped = get_enabled_services_by_platform()
     markup = telebot.types.InlineKeyboardMarkup(row_width=1)
     platforms = sorted(grouped, key=lambda text: text.lower())
     if not platforms:
@@ -1015,7 +999,7 @@ def service_catalog_home_markup(page=0, page_size=6):
     start = page * page_size
     end = start + page_size
     for platform_id, platform in enumerate(platforms[start:end], start=start):
-        service_count = sum(len(services) for services in grouped[platform].values())
+        service_count = len(grouped[platform])
         markup.add(telebot.types.InlineKeyboardButton(
             f"{format_service_platform(platform)} ({service_count})",
             callback_data=f"svc_catalog_platform:{platform_id}"
@@ -1038,22 +1022,17 @@ def service_catalog_home_markup(page=0, page_size=6):
 
 
 def service_catalog_platform_markup(platform, page=0, page_size=6):
-    grouped = get_enabled_services_by_platform_category().get(platform, {})
+    services = get_enabled_services_by_platform().get(platform, [])
     markup = telebot.types.InlineKeyboardMarkup(row_width=1)
-    categories = sorted(grouped, key=lambda text: text.lower())
-    total_pages = max(1, (len(categories) + page_size - 1) // page_size)
+    total_pages = max(1, (len(services) + page_size - 1) // page_size)
     page = max(0, min(page, total_pages - 1))
     start = page * page_size
     end = start + page_size
-    platform_id = sorted(
-        get_enabled_services_by_platform_category(), key=lambda text: text.lower()
-    ).index(platform)
-    for category_id, category in enumerate(categories[start:end], start=start):
-        service_count = len(grouped[category])
-        category_price = min(get_selling_rate(service) for service in grouped[category])
+    platform_id = sorted(get_enabled_services_by_platform(), key=lambda text: text.lower()).index(platform)
+    for service in services[start:end]:
         markup.add(telebot.types.InlineKeyboardButton(
-            f"{format_service_platform(platform)} {category} — ₹{format_selling_price(category_price)}/1K ({service_count})",
-            callback_data=f"svc_catalog_category:{platform_id}:{category_id}"
+            f"{service['display_name']} — ₹{format_selling_price(get_selling_rate(service))}/1K",
+            callback_data=f"svc_catalog_service:{service['_id']}"
         ))
 
     if total_pages > 1:
@@ -1072,51 +1051,10 @@ def service_catalog_platform_markup(platform, page=0, page_size=6):
     return markup
 
 
-def service_catalog_category_markup(platform, category, page=0, page_size=6):
-    grouped = get_enabled_services_by_platform_category().get(platform, {})
-    services = grouped.get(category, [])
-    markup = telebot.types.InlineKeyboardMarkup(row_width=1)
-    total_pages = max(1, (len(services) + page_size - 1) // page_size)
-    page = max(0, min(page, total_pages - 1))
-    start = page * page_size
-    end = start + page_size
+def service_catalog_details_markup(service_id, platform):
     platform_id = sorted(
-        get_enabled_services_by_platform_category(), key=lambda text: text.lower()
+        get_enabled_services_by_platform(), key=lambda text: text.lower()
     ).index(platform)
-    categories = sorted(grouped, key=lambda text: text.lower())
-    category_id = categories.index(category)
-    for service in services[start:end]:
-        markup.add(telebot.types.InlineKeyboardButton(
-            f"{service['display_name']} — ₹{get_selling_rate(service):.2f}/1K",
-            callback_data=f"svc_catalog_service:{service['_id']}"
-        ))
-
-    if total_pages > 1:
-        nav_row = []
-        nav_row.append(telebot.types.InlineKeyboardButton(
-            "⬅️ Previous",
-            callback_data=f"svc_catalog_category_page:{platform_id}:{category_id}:{page - 1}" if page > 0 else "svc_catalog_page_disabled"
-        ))
-        nav_row.append(telebot.types.InlineKeyboardButton(
-            "➡️ Next",
-            callback_data=f"svc_catalog_category_page:{platform_id}:{category_id}:{page + 1}" if page + 1 < total_pages else "svc_catalog_page_disabled"
-        ))
-        markup.row(*nav_row)
-
-    markup.add(telebot.types.InlineKeyboardButton("⬅️ Back", callback_data=f"svc_catalog_platform:{platform_id}"))
-    markup.add(telebot.types.InlineKeyboardButton("🏠 Home", callback_data="svc_catalog_home"))
-    return markup
-
-
-def service_catalog_details_markup(service_id, platform, category):
-    platform_id = sorted(
-        get_enabled_services_by_platform_category(), key=lambda text: text.lower()
-    ).index(platform)
-    categories = sorted(
-        get_enabled_services_by_platform_category().get(platform, {}),
-        key=lambda text: text.lower()
-    )
-    category_id = categories.index(category)
     markup = telebot.types.InlineKeyboardMarkup(row_width=1)
     markup.add(telebot.types.InlineKeyboardButton(
         "🛒 Order Now",
@@ -1124,14 +1062,24 @@ def service_catalog_details_markup(service_id, platform, category):
     ))
     markup.add(telebot.types.InlineKeyboardButton(
         "⬅️ Back",
-        callback_data=f"svc_catalog_category:{platform_id}:{category_id}"
+        callback_data=f"svc_catalog_platform:{platform_id}"
     ))
     markup.add(telebot.types.InlineKeyboardButton("🏠 Home", callback_data="svc_catalog_home"))
     return markup
 
 
+def catalog_order_prompt_markup(service_id, back_callback=None):
+    back_callback = back_callback or f"svc_catalog_service:{service_id}"
+    markup = telebot.types.InlineKeyboardMarkup(row_width=2)
+    markup.add(
+        telebot.types.InlineKeyboardButton("⬅️ Back", callback_data=back_callback),
+        telebot.types.InlineKeyboardButton("🏠 Home", callback_data="svc_catalog_home"),
+    )
+    return markup
+
+
 def send_service_catalog_home(message):
-    grouped = get_enabled_services_by_platform_category()
+    grouped = get_enabled_services_by_platform()
     if not grouped:
         bot.send_message(
             message.chat.id,
@@ -1214,13 +1162,13 @@ def service_catalog_platform_callback(call):
         bot.answer_callback_query(call.id, "❌ Invalid platform.")
         return
 
-    grouped = get_enabled_services_by_platform_category()
+    grouped = get_enabled_services_by_platform()
     if not grouped.get(platform):
-        bot.answer_callback_query(call.id, "❌ No categories in this platform.")
+        bot.answer_callback_query(call.id, "❌ No services in this platform.")
         return
 
     edit_catalog_message(
-        f"📂 <b>{escape(platform)}</b>\n\nSelect a category:",
+        f"📂 <b>{escape(platform)}</b>\n\nSelect a service:",
         call.message,
         reply_markup=service_catalog_platform_markup(platform)
     )
@@ -1242,65 +1190,9 @@ def service_catalog_platform_page_callback(call):
         return
 
     edit_catalog_message(
-        f"📂 <b>{escape(platform)}</b>\n\nSelect a category:",
+        f"📂 <b>{escape(platform)}</b>\n\nSelect a service:",
         call.message,
         reply_markup=service_catalog_platform_markup(platform, page=page)
-    )
-
-
-@bot.callback_query_handler(func=lambda c: c.data.startswith("svc_catalog_category:"))
-@safe_callback
-def service_catalog_category_callback(call):
-    try:
-        _, platform_id, category_id = call.data.split(":", 2)
-    except ValueError:
-        bot.answer_callback_query(call.id, "❌ Invalid category.")
-        return
-
-    platform = get_platform_name_from_id(platform_id)
-    category = get_category_name_from_id(platform, category_id) if platform else None
-    if platform is None or category is None:
-        bot.answer_callback_query(call.id, "❌ Invalid category.")
-        return
-
-    services = get_enabled_services_by_platform_category().get(platform, {}).get(category, [])
-    if not services:
-        bot.answer_callback_query(call.id, "❌ No services in this category.")
-        return
-
-    text = f"📂 <b>{escape(platform)}</b>\n📁 <b>{escape(category)}</b>\n\nSelect a service:"
-    edit_catalog_message(
-        text,
-        call.message,
-        reply_markup=service_catalog_category_markup(platform, category)
-    )
-
-
-@bot.callback_query_handler(func=lambda c: c.data.startswith("svc_catalog_category_page:"))
-@safe_callback
-def service_catalog_category_page_callback(call):
-    try:
-        _, platform_id, category_id, page_str = call.data.split(":", 3)
-        page = int(page_str)
-    except (TypeError, ValueError):
-        bot.answer_callback_query(call.id, "❌ Invalid category page.")
-        return
-
-    platform = get_platform_name_from_id(platform_id)
-    category = get_category_name_from_id(platform, category_id) if platform else None
-    if platform is None or category is None:
-        bot.answer_callback_query(call.id, "❌ Invalid category.")
-        return
-
-    services = get_enabled_services_by_platform_category().get(platform, {}).get(category, [])
-    if not services:
-        bot.answer_callback_query(call.id, "❌ No services in this category.")
-        return
-    text = f"📂 <b>{escape(platform)}</b>\n📁 <b>{escape(category)}</b>\n\nSelect a service:"
-    edit_catalog_message(
-        text,
-        call.message,
-        reply_markup=service_catalog_category_markup(platform, category, page=page)
     )
 
 
@@ -1319,10 +1211,10 @@ def service_catalog_service_callback(call):
         bot.answer_callback_query(call.id, "❌ This service is no longer available.")
         return
 
-    platform, category = get_user_catalog_service_parts(service)
+    platform, _ = get_user_catalog_service_parts(service)
     lines = [
         f"📦 <b>{escape(str(service['display_name']))}</b>",
-        f"Category: <b>{escape(category)}</b>",
+        f"Platform: <b>{escape(platform)}</b>",
         f"Min: <b>{service.get('min', 'N/A')}</b>",
         f"Max: <b>{service.get('max', 'N/A')}</b>",
         f"💰 Price: <b>₹{get_selling_rate(service):.2f}</b> / 1000",
@@ -1330,7 +1222,7 @@ def service_catalog_service_callback(call):
     edit_catalog_message(
         "\n".join(lines),
         call.message,
-        reply_markup=service_catalog_details_markup(service_id, platform, category)
+        reply_markup=service_catalog_details_markup(service_id, platform)
     )
 
 
@@ -1358,7 +1250,8 @@ def service_catalog_order_now_callback(call):
     bot.answer_callback_query(call.id)
     bot.send_message(
         user_id,
-        f"📦 <b>{escape(str(service['display_name']))}</b>\n\nSend the required link or username for this order:"
+        f"📦 <b>{escape(str(service['display_name']))}</b>\n\nSend the required link or username for this order:",
+        reply_markup=catalog_order_prompt_markup(service_id),
     )
 
 
@@ -1387,7 +1280,10 @@ def handle_catalog_order(message):
         bot.send_message(
             user_id,
             f"📏 Enter the quantity for <b>{escape(str(state['service_name']))}</b>\n"
-            f"Min: <b>{state['service_min']}</b> | Max: <b>{state['service_max']}</b>"
+            f"Min: <b>{state['service_min']}</b> | Max: <b>{state['service_max']}</b>",
+            reply_markup=catalog_order_prompt_markup(
+                state["service_id"], "svc_catalog_back_link"
+            ),
         )
         return
 
@@ -1464,6 +1360,23 @@ def service_catalog_back_order_callback(call):
         f"Min: <b>{state['service_min']}</b> | Max: <b>{state['service_max']}</b>",
         call.message.chat.id,
         call.message.message_id,
+        reply_markup=catalog_order_prompt_markup(state["service_id"]),
+    )
+
+
+@bot.callback_query_handler(func=lambda c: c.data == "svc_catalog_back_link")
+@safe_callback
+def service_catalog_back_link_callback(call):
+    state = user_state.get(call.message.chat.id)
+    if not state or state.get("action") != "catalog_order":
+        bot.answer_callback_query(call.id, "❌ No active order to edit.")
+        return
+    state["step"] = "awaiting_link"
+    bot.edit_message_text(
+        f"📦 <b>{escape(str(state['service_name']))}</b>\n\nSend the required link or username for this order:",
+        call.message.chat.id,
+        call.message.message_id,
+        reply_markup=catalog_order_prompt_markup(state["service_id"]),
     )
 
 
@@ -1708,6 +1621,7 @@ def admin_panel_markup():
     )
     mk.add(
         telebot.types.InlineKeyboardButton("🧰 Manage Services",  callback_data="ap_services"),
+        telebot.types.InlineKeyboardButton("⚙️ Curated Services", callback_data="ap_curated_services"),
         telebot.types.InlineKeyboardButton("🔄 Sync Services",    callback_data="ap_sync_services"),
     )
     mk.add(
@@ -1743,6 +1657,27 @@ def admin_panel_markup():
         telebot.types.InlineKeyboardButton("🖼 Edit QR URL",      callback_data="ap_edit_qr"),
     )
     mk.add(telebot.types.InlineKeyboardButton("🖼 Set Main Menu Photo", callback_data="ap_set_main_menu_photo"))
+    return mk
+
+
+def curated_services_markup():
+    mk = telebot.types.InlineKeyboardMarkup(row_width=2)
+    mk.add(
+        telebot.types.InlineKeyboardButton("➕ Add Service", callback_data="svc_admin_add"),
+        telebot.types.InlineKeyboardButton("📋 List Services", callback_data="ap_services"),
+    )
+    mk.add(
+        telebot.types.InlineKeyboardButton("✏️ Edit Service", callback_data="ap_services"),
+        telebot.types.InlineKeyboardButton("💰 Edit Price", callback_data="ap_service_prices"),
+    )
+    mk.add(
+        telebot.types.InlineKeyboardButton("🔄 Change Service ID", callback_data="ap_curated_service_ids"),
+        telebot.types.InlineKeyboardButton("🟢 Enable/Disable", callback_data="ap_services"),
+    )
+    mk.add(
+        telebot.types.InlineKeyboardButton("🗑️ Remove Service", callback_data="ap_services"),
+        telebot.types.InlineKeyboardButton("🔙 Back", callback_data="ap_back"),
+    )
     return mk
 
 
@@ -1987,17 +1922,13 @@ def services_admin_text():
 
 
 def service_editor_prompt(service=None):
-    example = "Platform | Display Name | Provider ID | Category | Min | Max | Selling Price | Enabled"
+    example = "Platform | Display Name | Provider ID | Selling Price"
     if service:
         values = " | ".join([
             str(service["platform"]),
             str(service["display_name"]),
             str(service["provider_service_id"]),
-            str(service["category"]),
-            str(service["min"]),
-            str(service["max"]),
             f"₹{get_selling_rate(service):.2f}",
-            "yes" if service.get("enabled") else "no",
         ])
         return (
             "✏️ <b>Edit Service</b>\n\n"
@@ -2089,6 +2020,25 @@ def admin_callback(call):
         )
         return
 
+    if data == "ap_curated_services":
+        bot.edit_message_text(
+            "⚙️ <b>Curated Services</b>\n\nManage the services shown to customers.",
+            uid, call.message.message_id, reply_markup=curated_services_markup()
+        )
+        return
+
+    if data == "ap_curated_service_ids":
+        user_state[uid] = {"action": "admin_service_id_search"}
+        mk = telebot.types.InlineKeyboardMarkup()
+        mk.add(telebot.types.InlineKeyboardButton("❌ Cancel", callback_data="ap_curated_services"))
+        bot.edit_message_text(
+            "🔄 <b>Change Service ID</b>\n\n"
+            "Search by curated service name, platform, or current provider service ID:",
+            uid, call.message.message_id, reply_markup=mk
+        )
+        bot.register_next_step_handler(call.message, process_admin_service_id_search)
+        return
+
     if data == "ap_service_prices":
         user_state[uid] = {"action": "admin_service_price_search"}
         mk = telebot.types.InlineKeyboardMarkup()
@@ -2150,6 +2100,9 @@ def admin_callback(call):
             ),
         )
         mk.add(telebot.types.InlineKeyboardButton(
+            "🔄 Change Service ID", callback_data=f"svc_admin_id:{service_id}"
+        ))
+        mk.add(telebot.types.InlineKeyboardButton(
             "🗑 Delete Service", callback_data=f"svc_admin_delete:{service_id}"
         ))
         mk.add(telebot.types.InlineKeyboardButton("🔙 Back", callback_data="ap_services"))
@@ -2163,6 +2116,27 @@ def admin_callback(call):
             f"Status: <b>{'Enabled' if service.get('enabled') else 'Disabled'}</b>",
             uid, call.message.message_id, reply_markup=mk
         )
+        return
+
+    if data.startswith("svc_admin_id:"):
+        service_id = data.split(":", 1)[1]
+        service = get_service_by_id(service_id)
+        if not service or not service.get("curated"):
+            bot.answer_callback_query(call.id, "Curated service not found.")
+            return
+        user_state[uid] = {"action": "admin_service_id_edit", "service_id": service_id}
+        mk = telebot.types.InlineKeyboardMarkup()
+        mk.add(telebot.types.InlineKeyboardButton(
+            "❌ Cancel", callback_data=f"svc_admin_edit:{service_id}"
+        ))
+        bot.edit_message_text(
+            f"🔄 <b>Change Service ID</b>\n\n"
+            f"Service: <b>{escape(str(service['display_name']))}</b>\n"
+            f"Current ID: <code>{service['provider_service_id']}</code>\n\n"
+            "Send the new provider service ID (integer only):",
+            uid, call.message.message_id, reply_markup=mk
+        )
+        bot.register_next_step_handler(call.message, process_admin_service_id_input)
         return
 
     if data.startswith("svc_admin_delete:"):
@@ -2903,11 +2877,11 @@ def process_admin_service_input(message):
         return
 
     parts = [part.strip() for part in message.text.split("|")]
-    if len(parts) != 8 or any(not part for part in parts[:4]):
+    if len(parts) not in {4, 8} or any(not part for part in parts[:4]):
         bot.send_message(
             uid,
             "❌ Invalid format. Use:\n"
-            "<code>Platform | Display Name | Provider ID | Category | Min | Max | Selling Price | Enabled</code>",
+            "<code>Platform | Display Name | Provider ID | Selling Price</code>",
             reply_markup=admin_panel_markup()
         )
         return
@@ -2917,10 +2891,10 @@ def process_admin_service_input(message):
     try:
         platform = find_platform(parts[0])
         provider_service_id = int(parts[2])
-        minimum = int(parts[4])
-        maximum = int(parts[5])
-        selling_rate = float(parts[6])
-        enabled_key = parts[7].lower()
+        selling_rate = float(parts[3] if len(parts) == 4 else parts[6])
+        minimum = int(parts[4]) if len(parts) == 8 else 1
+        maximum = int(parts[5]) if len(parts) == 8 else 2147483647
+        enabled_key = parts[7].lower() if len(parts) == 8 else "yes"
         if (
             not platform or provider_service_id <= 0 or minimum < 1 or maximum < minimum or
             selling_rate <= 0 or enabled_key not in enabled_values
@@ -2929,8 +2903,8 @@ def process_admin_service_input(message):
     except ValueError:
         bot.send_message(
             uid,
-            "❌ Invalid platform, numeric range, or enabled value. "
-            "Use Platform | Display Name | Provider ID | Category | Min | Max | Selling Price | Enabled.",
+            "❌ Invalid platform, provider ID, or selling price. "
+            "Use Platform | Display Name | Provider ID | Selling Price.",
             reply_markup=admin_panel_markup()
         )
         return
@@ -2940,13 +2914,19 @@ def process_admin_service_input(message):
         "platform": platform,
         "display_name": parts[1],
         "provider_service_id": provider_service_id,
-        "category": parts[3],
+        "category": find_service_type(parts[1]) or "General",
         "min": minimum,
         "max": maximum,
         "selling_price": selling_rate,
         "enabled": enabled_values[enabled_key],
         "curated": True,
     }
+    if state["action"] == "admin_service_edit" and len(parts) == 4:
+        existing = get_service_by_id(state["service_id"])
+        if existing:
+            service_data["min"] = existing.get("min", 1)
+            service_data["max"] = existing.get("max", 2147483647)
+            service_data["enabled"] = existing.get("enabled", False)
     if state["action"] == "admin_service_edit":
         services_collection.update_one(
             {"_id": state["service_id"]}, {"$set": service_data}
@@ -2962,6 +2942,64 @@ def process_admin_service_input(message):
         f"✅ Service <b>{escape(parts[1])}</b> {result}.",
         reply_markup=admin_panel_markup()
     )
+
+
+@safe_handler
+def process_admin_service_id_input(message):
+    uid = message.chat.id
+    state = user_state.pop(uid, {})
+    if state.get("action") != "admin_service_id_edit" or not is_admin(uid):
+        return
+    value = (message.text or "").strip()
+    if not value.isdigit() or int(value) <= 0:
+        bot.send_message(uid, "❌ Service ID must be a positive whole number.", reply_markup=admin_panel_markup())
+        return
+    service = get_service_by_id(state.get("service_id"))
+    if not service or not service.get("curated"):
+        bot.send_message(uid, "❌ Curated service not found.", reply_markup=admin_panel_markup())
+        return
+    services_collection.update_one(
+        {"_id": service["_id"], "curated": True},
+        {"$set": {"provider_service_id": int(value)}}
+    )
+    bot.send_message(
+        uid,
+        f"✅ <b>{escape(str(service['display_name']))}</b> provider service ID updated.",
+        reply_markup=admin_panel_markup()
+    )
+
+
+@safe_handler
+def process_admin_service_id_search(message):
+    uid = message.chat.id
+    state = user_state.pop(uid, {})
+    if state.get("action") != "admin_service_id_search" or not is_admin(uid):
+        return
+    query = (message.text or "").strip().lower()
+    if not query:
+        bot.send_message(uid, "❌ Enter a service name, platform, or provider service ID.", reply_markup=admin_panel_markup())
+        return
+    services = []
+    for service in services_collection.find({"curated": True}).sort([("platform", 1), ("display_name", 1)]):
+        searchable = " ".join([
+            str(service.get("display_name") or ""),
+            str(service.get("platform") or ""),
+            str(service.get("provider_service_id") or ""),
+        ]).lower()
+        if query in searchable:
+            services.append(service)
+    if not services:
+        bot.send_message(uid, "❌ No curated services matched your search.", reply_markup=admin_panel_markup())
+        return
+    markup = telebot.types.InlineKeyboardMarkup(row_width=1)
+    for service in services[:20]:
+        status = "ON" if service.get("enabled") else "OFF"
+        markup.add(telebot.types.InlineKeyboardButton(
+            f"{service['display_name']} ({status})",
+            callback_data=f"svc_admin_id:{service['_id']}"
+        ))
+    markup.add(telebot.types.InlineKeyboardButton("🔙 Back", callback_data="ap_curated_services"))
+    bot.send_message(uid, "🔄 <b>Select a curated service:</b>", reply_markup=markup)
 
 
 @safe_handler
