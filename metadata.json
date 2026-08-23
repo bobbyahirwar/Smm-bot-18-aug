@@ -1,0 +1,6 @@
+{
+  "name": "Bobby SMM Bot",
+  "description": "Full-featured Social Media Marketing (SMM) panel and Telegram bot dashboard for ordering services, tracking orders, wallet management, gift codes, and admin controls.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

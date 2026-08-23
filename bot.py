@@ -10,6 +10,7 @@ import time
 from uuid import uuid4
 from html import escape
 from pymongo import MongoClient, ReturnDocument
+from emoji_helper import apply_custom_emojis, custom_emoji_html, CUSTOM_EMOJIS
 
 # ─────────────────────────────────────────────────────────────
 #  CONFIG FILE  (all settings live here – editable at runtime)
@@ -539,9 +540,10 @@ load_persistent_state()
 
 MAIN_COMMANDS = [
     "👍 Order Reactions", "👀 Order Views", "👥 Order Members",
-    "💰 Check Balance", "🎁 Claim Bonus", "➕ Add Funds",
-    "📢 Refer & Earn", "🔳 GiftCode", "💬 Feedback", "🔎 Search Service",
-    "� Services", "�🖲 Track Order", "📜 Order History"
+    "💰 Check Balance", "💰 BALANCE", "🎁 Claim Bonus", "➕ Add Funds", "➕ ADD FUNDS",
+    "📢 Refer & Earn", "📢 REFER & EARN", "🔳 GiftCode", "💬 Feedback", "💬 Support", "💬 SUPPORT",
+    "🔎 Search Service", "🛍 Services", "🛒 ORDER SERVICES", "🖲 Track Order", "🔍 ORDER STATUS", "🔍 Order Status",
+    "📜 Order History", "📦 My Orders", "📦 MY ORDERS", "⚠️ 𝖭𝗈𝗍𝖾", "⚠️ Note"
 ]
 
 # ─────────────────────────────────────────────────────────────
@@ -646,7 +648,7 @@ def send_log(text, disable_preview=True):
     try:
         # Accept @username or numeric chat_id
         target = ch if ch.startswith("-") else ("@" + ch.lstrip("@"))
-        bot.send_message(target, text, disable_web_page_preview=disable_preview)
+        bot.send_message(target, apply_custom_emojis(text), disable_web_page_preview=disable_preview)
     except Exception as e:
         print(f"[LOG CHANNEL ERROR] {e}")
 
@@ -784,17 +786,20 @@ def main_menu():
     markup = telebot.types.InlineKeyboardMarkup(row_width=2)
     markup.add(
         telebot.types.InlineKeyboardButton("🛒 ORDER SERVICES", callback_data="svc_catalog_home"),
+        telebot.types.InlineKeyboardButton("➕ ADD FUNDS", callback_data="main_menu_add_funds"),
+    )
+    markup.add(
+        telebot.types.InlineKeyboardButton("💰 BALANCE", callback_data="main_menu_check_balance"),
         telebot.types.InlineKeyboardButton("📦 MY ORDERS", callback_data="main_menu_my_orders"),
     )
     markup.add(
-        telebot.types.InlineKeyboardButton("💳 ADD FUNDS", callback_data="main_menu_add_funds"),
-        telebot.types.InlineKeyboardButton("💰 WALLET", callback_data="main_menu_check_balance"),
+        telebot.types.InlineKeyboardButton("🔍 ORDER STATUS", callback_data="main_menu_track_order"),
+        telebot.types.InlineKeyboardButton("📢 REFER & EARN", callback_data="main_menu_refer"),
     )
     markup.add(
-        telebot.types.InlineKeyboardButton("👥 REFER & EARN", callback_data="main_menu_refer"),
-        telebot.types.InlineKeyboardButton("📞 SUPPORT", callback_data="main_menu_support"),
+        telebot.types.InlineKeyboardButton("💬 SUPPORT", callback_data="main_menu_support"),
+        telebot.types.InlineKeyboardButton("⚠️ 𝖭𝗈𝗍𝖾", callback_data="main_menu_note"),
     )
-    markup.add(telebot.types.InlineKeyboardButton("ℹ️ HELP", callback_data="main_menu_help"))
     return markup
 
 
@@ -3393,11 +3398,13 @@ def joined_button_handler(call):
 def main_menu_action_callback(call):
     action_text = {
         "main_menu_my_orders": "📦 My Orders",
-        "main_menu_check_balance": "💰 Check Balance",
+        "main_menu_check_balance": "💰 Balance",
         "main_menu_add_funds": "➕ Add Funds",
         "main_menu_refer": "📢 Refer & Earn",
+        "main_menu_track_order": "🔍 Order Status",
         "main_menu_search": "🔎 Search Service",
-        "main_menu_support": "📞 Support",
+        "main_menu_support": "💬 Support",
+        "main_menu_note": "⚠️ Note",
         "main_menu_help": "ℹ️ Help",
     }.get(call.data)
     if not action_text:
@@ -3902,14 +3909,14 @@ def process_giftcode(message):
     bot.send_message(user_id, f"✅ Gift code <code>{code}</code> redeemed! You received <b>₹{amount:.2f}</b> 🎉")
 
 
-@bot.message_handler(func=lambda m: m.text == "🖲 Track Order")
+@bot.message_handler(func=lambda m: m.text in ["🖲 Track Order", "🔍 ORDER STATUS", "🔍 Order Status"])
 @safe_handler
 @require_not_banned
 def track_order(message):
     user_id = message.chat.id
     user_state.pop(user_id, None)
     user_state[user_id] = {"action": "track_order"}
-    bot.send_message(user_id, "𝗘𝗡𝗧𝗘𝗥 𝗬𝗢𝗨𝗥 𝗢𝗥𝗗𝗘𝗥 𝗜𝗗:")
+    bot.send_message(user_id, apply_custom_emojis("🔍 <b>Track Order</b>\n\n𝗘𝗡𝗧𝗘𝗥 𝗬𝗢𝗨𝗥 𝗢𝗥𝗗𝗘𝗥 𝗜𝗗:"))
     bot.register_next_step_handler(message, process_track_order)
 
 
@@ -4052,16 +4059,16 @@ def render_my_orders_page(user_id, page=0, page_size=5):
     return "\n".join(lines), markup
 
 
-@bot.message_handler(func=lambda m: m.text == "📦 My Orders")
+@bot.message_handler(func=lambda m: m.text in ["📦 My Orders", "📦 MY ORDERS"])
 @safe_handler
 @require_not_banned
 def my_orders(message):
     user_id = message.chat.id
     text, markup = render_my_orders_page(user_id, page=0)
     if markup is None:
-        bot.send_message(user_id, text)
+        bot.send_message(user_id, apply_custom_emojis(text))
         return
-    bot.send_message(user_id, text, reply_markup=markup, disable_web_page_preview=True)
+    bot.send_message(user_id, apply_custom_emojis(text), reply_markup=markup, disable_web_page_preview=True)
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("my_orders_page:"))
@@ -4142,6 +4149,38 @@ def process_feedback(message):
     )
     bot.send_message(user_id, "✅ Feedback submitted! Thank you.")
 
+
+
+
+@bot.message_handler(func=lambda m: m.text in ["💬 Support", "💬 SUPPORT", "📞 Support", "📞 SUPPORT"])
+@safe_handler
+@require_not_banned
+def support_message_handler(message):
+    support_text = apply_custom_emojis(
+        f"💬 <b>Support</b>\n\nFor assistance, contact {escape(str(cfg.get('payment_contact') or primary_admin_id()))}."
+    )
+    bot.send_message(message.chat.id, support_text, reply_markup=main_menu())
+
+
+@bot.message_handler(func=lambda m: m.text in ["⚠️ 𝖭𝗈𝗍𝖾", "⚠️ Note"])
+@safe_handler
+@require_not_banned
+def note_message_handler(message):
+    note_text = apply_custom_emojis(
+        "⚠️ <b>Note</b>\n\n"
+        "• Please make sure your account/post is public before ordering.\n"
+        "• Do not place multiple orders for the same link simultaneously.\n"
+        "• Orders once placed cannot be cancelled.\n"
+        "• For any issues or queries, contact 💬 Support."
+    )
+    bot.send_message(message.chat.id, note_text, reply_markup=main_menu())
+
+
+@bot.message_handler(func=lambda m: m.text in ["🛒 ORDER SERVICES", "🛍 Services"])
+@safe_handler
+@require_not_banned
+def order_services_message_handler(message):
+    send_service_catalog_home(message)
 
 # ─────────────────────────────────────────────────────────────
 #  LEGACY TEXT COMMANDS (still work for admin convenience)
